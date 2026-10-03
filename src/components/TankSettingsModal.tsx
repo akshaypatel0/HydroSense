@@ -21,9 +21,12 @@ import {
   Target,
   Wrench,
   X,
+  Bell,
+  Send,
 } from 'lucide-react';
 import { Language, TRANSLATIONS } from '../i18n/translations';
 import { usageTracker } from '../services/usageTracker';
+import { notificationService, NotificationSettings } from '../services/notificationService';
 import { ConnectionState, TankConfig, TelemetryData } from '../types';
 
 interface TankSettingsModalProps {
@@ -52,7 +55,9 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
   setIsDarkMode,
 }) => {
   const t = TRANSLATIONS[lang];
-  const [activeSubTab, setActiveSubTab] = useState<'calibration' | 'capacity'>('calibration');
+  const [activeSubTab, setActiveSubTab] = useState<'calibration' | 'capacity' | 'notifications'>('calibration');
+  const [notifSettings, setNotifSettings] = useState<NotificationSettings>(() => notificationService.getSettings());
+  const [testNotifSent, setTestNotifSent] = useState(false);
 
   // Capacity & Target Form State
   const [capacity, setCapacity] = useState<number>(config.tankCapacityLiters);
@@ -193,7 +198,7 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
 
             <button
               onClick={() => setActiveSubTab('capacity')}
-              className={`flex-1 py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+              className={`flex-1 py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
                 activeSubTab === 'capacity'
                   ? 'bg-white dark:bg-slate-900 text-cyan-700 dark:text-cyan-400 shadow-sm font-bold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -201,6 +206,18 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
             >
               <Droplets className="h-3.5 w-3.5" />
               <span>{t.tabCapacity}</span>
+            </button>
+
+            <button
+              onClick={() => setActiveSubTab('notifications')}
+              className={`flex-1 py-1.5 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+                activeSubTab === 'notifications'
+                  ? 'bg-white dark:bg-slate-900 text-cyan-700 dark:text-cyan-400 shadow-sm font-bold'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              <Bell className="h-3.5 w-3.5" />
+              <span>{lang === 'gu' ? 'સૂચનાઓ' : 'Alerts'}</span>
             </button>
           </div>
         </div>
@@ -640,6 +657,195 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
               </div>
             </div>
           </form>
+        )}
+
+        {/* TAB 3: USEFUL NOTIFICATIONS (ANTI-SPAM) */}
+        {activeSubTab === 'notifications' && (
+          <div className="p-4 sm:p-5 space-y-4 text-xs overflow-y-auto touch-scroll flex-1">
+            
+            {/* Header info */}
+            <div className="rounded-2xl bg-cyan-50/70 dark:bg-cyan-950/40 p-3.5 border border-cyan-500/20 space-y-1">
+              <div className="flex items-center gap-2 font-bold text-cyan-900 dark:text-cyan-200">
+                <Bell className="h-4 w-4 text-cyan-600 dark:text-cyan-400" />
+                <span>{lang === 'gu' ? 'સ્માર્ટ સૂચનાઓ (Anti-Spam Push Alerts)' : 'Smart Notifications (Anti-Spam)'}</span>
+              </div>
+              <p className="text-[11px] text-cyan-800/80 dark:text-cyan-300/80 leading-relaxed">
+                {lang === 'gu'
+                  ? 'ફક્ત મહત્વના સમયે જ સૂચના મળશે. ટાંકી ભરાઈ જાય (Target Reached), ઓવરફ્લો જોખમ (Cutoff Alert) અથવા પાણી ઘટી જાય ત્યારે જ એલર્ટ આવશે.'
+                  : 'Receive timely, useful status bar alerts without spamming. Notifications trigger strictly on state transitions (Target reached, low water, and overflow cutoff warnings).'}
+              </p>
+            </div>
+
+            {/* Master Push Notification Toggle */}
+            <div className="flex items-center justify-between p-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/60 shadow-sm">
+              <div>
+                <div className="font-bold text-slate-900 dark:text-white">
+                  {lang === 'gu' ? 'બધી સૂચનાઓ સક્ષમ કરો' : 'Enable Tank Notifications'}
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  {lang === 'gu' ? 'સિસ્ટમ સ્ટેટસ બાર અને ઇન-એપ એલર્ટ્સ' : 'Android status bar & in-app alerts'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const updated = { ...notifSettings, enabled: !notifSettings.enabled };
+                  setNotifSettings(updated);
+                  notificationService.saveSettings(updated);
+                }}
+                className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors ${
+                  notifSettings.enabled ? 'bg-cyan-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+                }`}
+              >
+                <div className="bg-white w-4 h-4 rounded-full shadow-md transform transition-transform" />
+              </button>
+            </div>
+
+            {/* Granular Notification Rules */}
+            <div className="space-y-2 pt-1">
+              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                {lang === 'gu' ? 'એલર્ટ પ્રકારો' : 'Alert Triggers'}
+              </div>
+
+              {/* Rule 1: Target Reached */}
+              <div className="flex items-center justify-between p-3 rounded-xl border border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50">
+                <div className="pr-2">
+                  <div className="font-bold text-slate-800 dark:text-slate-200">
+                    {lang === 'gu' ? 'ટાંકી ટાર્ગેટ સુધી ભરાઈ જવાનું એલર્ટ' : 'Target Water Level Reached'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {lang === 'gu'
+                      ? 'જ્યારે પાણી 80% કે સેટ ટાર્ગેટ પર પહોંચે ત્યારે મોટર બંધ કરવા માટે ૧ વાર એલર્ટ.'
+                      : 'Fires once when tank fills to target (e.g. 80%) so you can stop the motor.'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!notifSettings.enabled}
+                  onClick={() => {
+                    const updated = { ...notifSettings, notifyOnTarget: !notifSettings.notifyOnTarget };
+                    setNotifSettings(updated);
+                    notificationService.saveSettings(updated);
+                  }}
+                  className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors disabled:opacity-40 ${
+                    notifSettings.notifyOnTarget ? 'bg-emerald-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+                  }`}
+                >
+                  <div className="bg-white w-4 h-4 rounded-full shadow-sm" />
+                </button>
+              </div>
+
+              {/* Rule 2: Cutoff / Overflow Risk */}
+              <div className="flex items-center justify-between p-3 rounded-xl border border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50">
+                <div className="pr-2">
+                  <div className="font-bold text-slate-800 dark:text-slate-200">
+                    {lang === 'gu' ? 'ઓવરફ્લો અને કટ-ઓફ એલર્ટ' : 'Overflow Cutoff Risk (Critical)'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {lang === 'gu'
+                      ? 'જ્યારે પાણી કટ-ઓફ માર્ક (95%) વટાવે ત્યારે તાત્કાલિક સાવચેતી એલર્ટ.'
+                      : 'High priority alert when tank water exceeds cutoff threshold (95%+).'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!notifSettings.enabled}
+                  onClick={() => {
+                    const updated = { ...notifSettings, notifyOnCutoff: !notifSettings.notifyOnCutoff };
+                    setNotifSettings(updated);
+                    notificationService.saveSettings(updated);
+                  }}
+                  className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors disabled:opacity-40 ${
+                    notifSettings.notifyOnCutoff ? 'bg-rose-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+                  }`}
+                >
+                  <div className="bg-white w-4 h-4 rounded-full shadow-sm" />
+                </button>
+              </div>
+
+              {/* Rule 3: Low Water Reserve */}
+              <div className="flex items-center justify-between p-3 rounded-xl border border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50">
+                <div className="pr-2">
+                  <div className="font-bold text-slate-800 dark:text-slate-200">
+                    {lang === 'gu' ? 'ઓછું પાણી વોર્નિંગ (Low Water Reserve)' : 'Low Water Reserve Warning'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {lang === 'gu'
+                      ? 'જ્યારે ટાંકીમાં પાણી 20% થી ઓછું થાય ત્યારે ૧ વાર રીમાઇન્ડર.'
+                      : 'Fires once when tank falls below 20% to remind you to refill.'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!notifSettings.enabled}
+                  onClick={() => {
+                    const updated = { ...notifSettings, notifyOnLow: !notifSettings.notifyOnLow };
+                    setNotifSettings(updated);
+                    notificationService.saveSettings(updated);
+                  }}
+                  className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors disabled:opacity-40 ${
+                    notifSettings.notifyOnLow ? 'bg-amber-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+                  }`}
+                >
+                  <div className="bg-white w-4 h-4 rounded-full shadow-sm" />
+                </button>
+              </div>
+
+              {/* Rule 4: Sensor Fault */}
+              <div className="flex items-center justify-between p-3 rounded-xl border border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/50">
+                <div className="pr-2">
+                  <div className="font-bold text-slate-800 dark:text-slate-200">
+                    {lang === 'gu' ? 'સેન્સર ખામી એલર્ટ' : 'Sensor Offline Alert'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {lang === 'gu'
+                      ? 'અલ્ટ્રાસોનિક સેન્સર ડિસ્કનેક્ટ થાય ત્યારે જાણ કરે છે.'
+                      : 'Notifies if ultrasonic distance sensor loses connection or echo.'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={!notifSettings.enabled}
+                  onClick={() => {
+                    const updated = { ...notifSettings, notifyOnSensorError: !notifSettings.notifyOnSensorError };
+                    setNotifSettings(updated);
+                    notificationService.saveSettings(updated);
+                  }}
+                  className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors disabled:opacity-40 ${
+                    notifSettings.notifyOnSensorError ? 'bg-indigo-600 justify-end' : 'bg-slate-300 dark:bg-slate-700 justify-start'
+                  }`}
+                >
+                  <div className="bg-white w-4 h-4 rounded-full shadow-sm" />
+                </button>
+              </div>
+            </div>
+
+            {/* Test Notification Trigger */}
+            <div className="pt-2 flex items-center justify-between border-t border-slate-200/80 dark:border-slate-800/80">
+              <button
+                type="button"
+                onClick={async () => {
+                  await notificationService.requestPermission();
+                  notificationService.sendTestNotification();
+                  setTestNotifSent(true);
+                  setTimeout(() => setTestNotifSent(false), 3000);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-50 dark:bg-cyan-950/50 border border-cyan-500/30 text-cyan-800 dark:text-cyan-300 hover:bg-cyan-100 dark:hover:bg-cyan-900/60 font-bold transition-all"
+              >
+                <Send className="h-3.5 w-3.5" />
+                <span>{testNotifSent ? (lang === 'gu' ? 'સૂચના મોકલાઈ ગઈ!' : 'Notification Sent!') : (lang === 'gu' ? 'ટેસ્ટ સૂચના મોકલો' : 'Send Test Notification')}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-bold hover:opacity-90 transition-opacity"
+              >
+                {t.doneBtn}
+              </button>
+            </div>
+
+          </div>
         )}
 
       </div>

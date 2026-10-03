@@ -1,11 +1,11 @@
 /**
  * Native Android HC-05 Bluetooth Classic SPP Application Source Code (v3.0.0)
  *
- * Full production Kotlin + Jetpack Compose project with:
- * - Automatic reconnection to previously paired/configured HC-05 device
- * - USB OTG serial connection support
- * - SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
- * - Authoritative telemetry parsing matching Arduino firmware v3.0.0
+ * Full production Kotlin project with:
+ * - Direct RFCOMM / SPP Bluetooth Classic Hardware Bridge for HC-05 (UUID: 00001101-0000-1000-8000-00805F9B34FB)
+ * - Hardware-accelerated offline WebView running the complete HydroSense UI
+ * - Native Android System Notifications for target reached, overflow cutoff, and reserve alerts
+ * - Anti-spam hysteresis tracking
  */
 
 export const ANDROID_MANIFEST_XML = `<?xml version="1.0" encoding="utf-8"?>
@@ -16,14 +16,20 @@ export const ANDROID_MANIFEST_XML = `<?xml version="1.0" encoding="utf-8"?>
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
 
     <!-- Modern Bluetooth Permissions (Android 12 / API 31+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" 
         android:usesPermissionFlags="neverForLocation" />
 
+    <!-- Native Notification Permissions (Android 13 / API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <!-- USB Host Feature for Android USB OTG connections -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -35,6 +41,7 @@ export const ANDROID_MANIFEST_XML = `<?xml version="1.0" encoding="utf-8"?>
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.HydroSense">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -58,9 +65,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -69,7 +73,7 @@ import java.util.UUID
 /**
  * Native Android Bluetooth Classic RFCOMM / SPP Service for HC-05 module.
  * Standard SPP Serial Port UUID: 00001101-0000-1000-8000-00805F9B34FB
- * Features automatic connection to previously configured device on launch.
+ * Streams bidirectional serial lines between HC-05 and the HydroSense UI.
  */
 class BluetoothSPPService(
     private val context: Context,
@@ -82,161 +86,157 @@ class BluetoothSPPService(
         private const val KEY_LAST_DEVICE_MAC = "last_hc05_mac"
     }
 
-    enum class ConnectionState {
-        DISCONNECTED,
-        CONNECTING,
-        CONNECTED,
-        RECONNECTING,
-        ERROR
-    }
-
-    data class Telemetry(
-        val water: Float = 0f,
-        val status: String = "NORMAL",
-        val target: Int = 80,
-        val cutoff: Int = 90,
-        val error: String = "NONE",
-        val calEmpty: Float = 12.8f,
-        val calFull: Float = 2.1f,
-        val distance: Float = 0f,
-        val buzzer: String = "OFF",
-        val timestamp: Long = System.currentTimeMillis()
-    )
+    var onRawLine: ((String) -> Unit)? = null
+    var onStatusChange: ((status: String, message: String?) -> Unit)? = null
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
-
-    private val _connectedDeviceName = MutableStateFlow<String?>(null)
-    val connectedDeviceName: StateFlow<String?> = _connectedDeviceName.asStateFlow()
-
-    private val _telemetry = MutableStateFlow<Telemetry?>(null)
-    val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
-
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     private var socket: BluetoothSocket? = null
     private var outputStream: OutputStream? = null
     private var readerScope: CoroutineScope? = null
-    private var lastConnectedDevice: BluetoothDevice? = null
+    private var connectedDevice: BluetoothDevice? = null
+    private var isCurrentlyConnected = false
+
+    fun isConnected(): Boolean = isCurrentlyConnected && socket?.isConnected == true
+
+    fun getConnectedDeviceName(): String? = connectedDevice?.name ?: connectedDevice?.address
 
     @SuppressLint("MissingPermission")
     fun getPairedDevices(): List<BluetoothDevice> {
-        return bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
+        return try {
+            bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error listing paired devices: \${e.message}")
+            emptyList()
+        }
     }
 
-    /**
-     * Attempts automatic connection to previously configured device if available.
-     */
     @SuppressLint("MissingPermission")
-    fun connectAuto() {
-        val lastMac = prefs.getString(KEY_LAST_DEVICE_MAC, null) ?: return
+    fun connectAuto(): Boolean {
+        val lastMac = prefs.getString(KEY_LAST_DEVICE_MAC, null)
         val paired = getPairedDevices()
-        val match = paired.find { it.address.equals(lastMac, ignoreCase = true) }
-        if (match != null) {
-            Log.d(TAG, "Auto-connecting to previously paired HC-05: \${match.name} (\${match.address})")
-            connect(match)
+        if (lastMac != null) {
+            val match = paired.find { it.address.equals(lastMac, ignoreCase = true) }
+            if (match != null) {
+                Log.d(TAG, "Auto-connecting to previously saved device: \${match.name} (\${match.address})")
+                connect(match)
+                return true
+            }
+        }
+
+        val hcDevice = paired.find {
+            val name = it.name?.uppercase() ?: ""
+            name.contains("HC-05") || name.contains("HC-06") || name.contains("HYDRO") || name.contains("ARDUINO")
+        } ?: paired.firstOrNull()
+
+        if (hcDevice != null) {
+            Log.d(TAG, "Auto-connecting to found paired device: \${hcDevice.name} (\${hcDevice.address})")
+            connect(hcDevice)
+            return true
+        }
+
+        return false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connectByAddress(macAddress: String): Boolean {
+        val paired = getPairedDevices()
+        val device = paired.find { it.address.equals(macAddress, ignoreCase = true) }
+            ?: try {
+                bluetoothAdapter?.getRemoteDevice(macAddress)
+            } catch (e: Exception) {
+                null
+            }
+
+        if (device != null) {
+            connect(device)
+            return true
+        } else {
+            onStatusChange?.invoke("error", "Device with MAC $macAddress not found.")
+            return false
         }
     }
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
-        lastConnectedDevice = device
-        // Persist MAC address for subsequent auto-connections
+        connectedDevice = device
         prefs.edit().putString(KEY_LAST_DEVICE_MAC, device.address).apply()
 
         disconnect()
 
+        onStatusChange?.invoke("connecting", device.name ?: device.address)
+
         readerScope = CoroutineScope(Dispatchers.IO + Job())
         readerScope?.launch {
-            _connectionState.value = ConnectionState.CONNECTING
-            _connectedDeviceName.value = device.name ?: device.address
             try {
-                bluetoothAdapter?.cancelDiscovery()
+                try {
+                    bluetoothAdapter?.cancelDiscovery()
+                } catch (_: Exception) {}
 
+                Log.d(TAG, "Opening RFCOMM socket to: \${device.name} [\${device.address}]")
                 val newSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
                 newSocket.connect()
 
                 socket = newSocket
                 outputStream = newSocket.outputStream
-                _connectionState.value = ConnectionState.CONNECTED
-                _lastError.value = null
-                Log.d(TAG, "Connected to HC-05: \${device.name} [\${device.address}]")
+                isCurrentlyConnected = true
 
-                // Request initial status packet
-                sendCommand("STATUS")
+                val devLabel = device.name ?: device.address ?: "HC-05 SPP"
+                Log.d(TAG, "Connected to $devLabel")
+                onStatusChange?.invoke("connected", devLabel)
 
-                val reader = BufferedReader(InputStreamReader(newSocket.inputStream))
-                while (isActive) {
+                // Query initial status packet
+                sendCommand("STATUS\\n")
+
+                val reader = BufferedReader(InputStreamReader(newSocket.inputStream, Charsets.UTF_8))
+                while (isActive && isCurrentlyConnected) {
                     val line = reader.readLine() ?: break
-                    parseIncomingLine(line.trim())
+                    val trimmed = line.trim()
+                    if (trimmed.isNotEmpty()) {
+                        onRawLine?.invoke(trimmed)
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Connection error: \${e.message}", e)
-                _lastError.value = e.message ?: "Connection lost"
-                _connectionState.value = ConnectionState.ERROR
+                Log.e(TAG, "Connection failed or lost: \${e.message}", e)
+                isCurrentlyConnected = false
+                onStatusChange?.invoke("error", e.message ?: "Bluetooth SPP connection lost")
             } finally {
                 cleanUp()
             }
         }
     }
 
-    fun sendCommand(command: String) {
-        readerScope?.launch(Dispatchers.IO) {
-            try {
-                val formatted = if (command.endsWith("\\n")) command else "$command\\n"
-                outputStream?.write(formatted.toByteArray(Charsets.UTF_8))
-                outputStream?.flush()
-                Log.d(TAG, "Transmitted command: $command")
-            } catch (e: Exception) {
-                Log.e(TAG, "Command failed: \${e.message}")
-            }
+    fun sendCommand(command: String): Boolean {
+        if (!isConnected()) {
+            Log.w(TAG, "Cannot send command: not connected")
+            return false
         }
-    }
 
-    private fun parseIncomingLine(line: String) {
-        if (line.startsWith("STATUS")) {
-            try {
-                val tokens = line.split(",")
-                val map = mutableMapOf<String, String>()
-                for (i in 1 until tokens.size) {
-                    val parts = tokens[i].split("=")
-                    if (parts.size == 2) {
-                        map[parts[0].trim().lowercase()] = parts[1].trim()
-                    }
-                }
-
-                val t = Telemetry(
-                    water = map["water"]?.toFloatOrNull() ?: 0f,
-                    status = map["status"]?.uppercase() ?: "NORMAL",
-                    target = map["target"]?.toIntOrNull() ?: 80,
-                    cutoff = map["cutoff"]?.toIntOrNull() ?: 90,
-                    error = map["error"]?.uppercase() ?: "NONE",
-                    calEmpty = map["empty"]?.toFloatOrNull() ?: 12.8f,
-                    calFull = map["full"]?.toFloatOrNull() ?: 2.1f,
-                    distance = map["distance"]?.toFloatOrNull() ?: 0f,
-                    buzzer = map["buzzer"]?.uppercase() ?: "OFF",
-                    timestamp = System.currentTimeMillis()
-                )
-                _telemetry.value = t
-            } catch (e: Exception) {
-                Log.w(TAG, "Malformed line: $line", e)
-            }
+        return try {
+            val formatted = if (command.endsWith("\\n")) command else "$command\\n"
+            outputStream?.write(formatted.toByteArray(Charsets.UTF_8))
+            outputStream?.flush()
+            Log.d(TAG, "Sent command: \${command.trim()}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Send failed: \${e.message}")
+            false
         }
     }
 
     fun disconnect() {
+        isCurrentlyConnected = false
         readerScope?.cancel()
         cleanUp()
-        _connectionState.value = ConnectionState.DISCONNECTED
-        _connectedDeviceName.value = null
+        onStatusChange?.invoke("disconnected", null)
     }
 
     private fun cleanUp() {
+        isCurrentlyConnected = false
         try {
             outputStream?.close()
+        } catch (_: Exception) {}
+        try {
             socket?.close()
         } catch (_: Exception) {}
         outputStream = null
@@ -247,322 +247,274 @@ class BluetoothSPPService(
 export const MAIN_ACTIVITY_KT = `package com.hydrosense.app
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
+import android.util.Log
+import android.view.View
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
+import org.json.JSONObject
 
+/**
+ * HydroSense Native Android Container with:
+ * 1. Hardware-accelerated offline WebView
+ * 2. Full Bluetooth Classic RFCOMM (SPP) Bridge for HC-05 Arduino communication
+ * 3. Native Android Notification System for critical water tank alerts & level updates
+ */
 class MainActivity : ComponentActivity() {
 
-    private lateinit var sppService: BluetoothSPPService
+    companion object {
+        private const val TAG = "HydroSenseActivity"
+        const val NOTIFICATION_CHANNEL_ID = "hydrosense_tank_alerts"
+        const val NOTIFICATION_CHANNEL_NAME = "HydroSense Tank Alerts"
+    }
+
+    private lateinit var webView: WebView
+    lateinit var sppService: BluetoothSPPService
     private var bluetoothAdapter: BluetoothAdapter? = null
 
-    private val permissionLauncher = registerForActivityResult(
+    private val requestBluetoothPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
-        if (allGranted) {
-            sppService.connectAuto()
-        } else {
-            Toast.makeText(this, "Bluetooth permissions required for HC-05 connection", Toast.LENGTH_LONG).show()
-        }
+        notifyWebPermissionStatus("bluetooth", allGranted)
     }
 
+    private val requestNotificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        notifyWebPermissionStatus("notifications", isGranted)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        bluetoothAdapter = bluetoothManager.adapter
+        window.statusBarColor = Color.parseColor("#090D16")
+        window.navigationBarColor = Color.parseColor("#090D16")
+
+        createNotificationChannel()
+
+        val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        bluetoothAdapter = bluetoothManager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
         sppService = BluetoothSPPService(this, bluetoothAdapter)
 
-        checkPermissionsAndAutoConnect()
+        sppService.onRawLine = { line ->
+            runOnUiThread {
+                val escaped = line
+                    .replace("\\\\", "\\\\\\\\")
+                    .replace("\\"", "\\\\\\\"")
+                    .replace("\\n", "\\\\n")
+                    .replace("\\r", "")
+                webView.evaluateJavascript(
+                    "window.onAndroidBluetoothData && window.onAndroidBluetoothData(\\"$escaped\\");",
+                    null
+                )
+            }
+        }
 
-        setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF090D16)
-                ) {
-                    HydroSenseScreen(
-                        sppService = sppService,
-                        onScanDevices = { sppService.getPairedDevices() }
-                    )
+        sppService.onStatusChange = { status, message ->
+            runOnUiThread {
+                val escStatus = status.replace("\\"", "\\\\\\\"")
+                val escMsg = (message ?: "").replace("\\"", "\\\\\\\"")
+                webView.evaluateJavascript(
+                    "window.onAndroidBluetoothStatus && window.onAndroidBluetoothStatus(\\"$escStatus\\", \\"$escMsg\\");",
+                    null
+                )
+            }
+        }
+
+        webView = WebView(this).apply {
+            setBackgroundColor(Color.parseColor("#090D16"))
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                allowFileAccess = true
+                allowContentAccess = true
+                allowFileAccessFromFileURLs = true
+                allowUniversalAccessFromFileURLs = true
+                mediaPlaybackRequiresUserGesture = false
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                builtInZoomControls = false
+                displayZoomControls = false
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = false
+            }
+
+            webChromeClient = WebChromeClient()
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+            val bridge = AndroidNativeBridge(this@MainActivity)
+            addJavascriptInterface(bridge, "AndroidBluetooth")
+            addJavascriptInterface(bridge, "AndroidBridge")
+
+            loadUrl("file:///android_asset/web/index.html")
+        }
+
+        setContentView(webView)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    finish()
                 }
             }
+        })
+
+        checkAndRequestPermissions()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val importance = NotificationManager.IMPORTANCE_HIGH
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                NOTIFICATION_CHANNEL_NAME,
+                importance
+            ).apply {
+                description = "Critical water level alerts, tank overflow warnings, and hardware updates"
+                enableLights(true)
+                lightColor = Color.CYAN
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 250, 150, 250)
+            }
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
         }
     }
 
-    private fun checkPermissionsAndAutoConnect() {
-        val needed = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.BLUETOOTH_SCAN)
-            }
+    fun hasBluetoothPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         }
+    }
 
-        if (needed.isEmpty()) {
-            sppService.connectAuto()
+    fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else {
-            permissionLauncher.launch(needed.toTypedArray())
+            NotificationManagerCompat.from(this).areNotificationsEnabled()
+        }
+    }
+
+    fun checkAndRequestPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
+            requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (!hasBluetoothPermission()) {
+            requestBluetoothPermissions()
+        }
+    }
+
+    fun requestBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            requestBluetoothPermissionsLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN))
+        } else {
+            requestBluetoothPermissionsLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
+    }
+
+    private fun notifyWebPermissionStatus(type: String, granted: Boolean) {
+        runOnUiThread {
+            webView.evaluateJavascript("window.onAndroidPermissionResult && window.onAndroidPermissionResult(\\"$type\\", $granted);", null)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun sendNotification(title: String, message: String, tag: String? = null): Boolean {
+        return try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setColor(Color.parseColor("#06B6D4"))
+
+            val notificationManager = NotificationManagerCompat.from(this)
+            val notificationId = (tag?.hashCode() ?: System.currentTimeMillis().toInt()) and 0x7FFFFFFF
+            notificationManager.notify(notificationId, builder.build())
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         sppService.disconnect()
-    }
-}
-
-@Composable
-fun HydroSenseScreen(
-    sppService: BluetoothSPPService,
-    onScanDevices: () -> List<BluetoothDevice>
-) {
-    val connectionState by sppService.connectionState.collectAsState()
-    val connectedDeviceName by sppService.connectedDeviceName.collectAsState()
-    val telemetry by sppService.telemetry.collectAsState()
-
-    var showDeviceDialog by remember { mutableStateOf(false) }
-    var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
-
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // Top Bar
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "HydroSense",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                    Text(
-                        text = if (connectionState == BluetoothSPPService.ConnectionState.CONNECTED)
-                            "Connected: \${connectedDeviceName ?: "HC-05"}"
-                        else
-                            "Auto-reconnect ready",
-                        fontSize = 12.sp,
-                        color = Color(0xFF64748B)
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        if (connectionState == BluetoothSPPService.ConnectionState.CONNECTED) {
-                            sppService.disconnect()
-                        } else {
-                            pairedDevices = onScanDevices()
-                            showDeviceDialog = true
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (connectionState == BluetoothSPPService.ConnectionState.CONNECTED) Color(0xFF1E293B) else Color(0xFF0284C7)
-                    ),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(
-                        text = when (connectionState) {
-                            BluetoothSPPService.ConnectionState.CONNECTED -> "Disconnect"
-                            BluetoothSPPService.ConnectionState.CONNECTING -> "Connecting..."
-                            else -> "Connect HC-05"
-                        },
-                        fontSize = 13.sp
-                    )
-                }
-            }
-        }
-
-        // Reservoir Dashboard Card - Final Output Only
-        item {
-            val waterLevel = telemetry?.water ?: 0f
-            val status = telemetry?.status ?: "OFFLINE"
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(280.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(Color(0xFF0F172A).copy(alpha = 0.7f))
-                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(24.dp))
-                    .padding(20.dp)
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Water Reservoir", color = Color(0xFF94A3B8), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            text = status,
-                            color = when (status) {
-                                "CRITICAL", "HIGH" -> Color(0xFFEF4444)
-                                "TARGET REACHED" -> Color(0xFF10B981)
-                                "LOW" -> Color(0xFFF59E0B)
-                                else -> Color(0xFF38BDF8)
-                            },
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    // Water Animation Level
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(150.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF0B132B)),
-                        contentAlignment = Alignment.BottomCenter
-                    ) {
-                        val animatedFraction by animateFloatAsState(
-                            targetValue = (waterLevel / 100f).coerceIn(0f, 1f),
-                            animationSpec = tween(durationMillis = 800)
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .fillMaxHeight(animatedFraction)
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(Color(0xFF38BDF8), Color(0xFF0284C7))
-                                    )
-                                )
-                        )
-                        Column(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "\${waterLevel.toInt()}%",
-                                fontSize = 42.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "Volume: \${String.format("%.1f", waterLevel * 0.1f)} L",
-                                fontSize = 13.sp,
-                                color = Color.White.copy(alpha = 0.85f)
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Target: \${telemetry?.target ?: 80}%", color = Color(0xFF94A3B8), fontSize = 12.sp)
-                        Text("Cutoff: \${telemetry?.cutoff ?: 90}%", color = Color(0xFFEF4444), fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-
-        // Status & Buzzer Alert Indicator
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A).copy(alpha = 0.7f)),
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(24.dp))
-            ) {
-                Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        text = "Safety Buzzer Alert: \${if (telemetry?.buzzer == \"ON\") \"ACTIVE (HIGH WATER)\" else \"NORMAL / SILENT\"}",
-                        fontWeight = FontWeight.Bold,
-                        color = if (telemetry?.buzzer == "ON") Color(0xFFF43F5E) else Color(0xFF10B981)
-                    )
-                    Text(
-                        text = "Calibration: \${telemetry?.calStatus ?: \"OK\"} (Empty: \${telemetry?.calEmpty ?: 12.8f}cm, Full: \${telemetry?.calFull ?: 2.1f}cm)",
-                        fontSize = 12.sp,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
-            }
-        }
+        webView.destroy()
+        super.onDestroy()
     }
 
-    if (showDeviceDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeviceDialog = false },
-            title = { Text("Select HC-05 Device") },
-            text = {
-                if (pairedDevices.isEmpty()) {
-                    Text("No paired Bluetooth devices found.\\n\\nPlease pair HC-05 in Android Settings first using PIN 1234 or 0000.")
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        pairedDevices.forEach { device ->
-                            Button(
-                                onClick = {
-                                    showDeviceDialog = false
-                                    sppService.connect(device)
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B))
-                            ) {
-                                Text("\${device.name ?: "Unknown"} (\${device.address})")
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showDeviceDialog = false }) {
-                    Text("Close")
-                }
+    inner class AndroidNativeBridge(private val activity: MainActivity) {
+        @JavascriptInterface fun isNativeApp(): Boolean = true
+        @JavascriptInterface fun hasBluetoothPermission(): Boolean = activity.hasBluetoothPermission()
+        @JavascriptInterface fun hasNotificationPermission(): Boolean = activity.hasNotificationPermission()
+        @JavascriptInterface fun requestBluetoothPermissions() { activity.runOnUiThread { activity.requestBluetoothPermissions() } }
+        @JavascriptInterface fun requestNotificationPermission() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                activity.requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
-        )
+        }
+        @JavascriptInterface fun getPairedDevicesJson(): String {
+            val array = JSONArray()
+            try {
+                for (dev in activity.sppService.getPairedDevices()) {
+                    val obj = JSONObject()
+                    obj.put("name", dev.name ?: "Unknown Device")
+                    obj.put("address", dev.address)
+                    array.put(obj)
+                }
+            } catch (_: Exception) {}
+            return array.toString()
+        }
+        @JavascriptInterface fun connect(macAddress: String?): Boolean = if (!macAddress.isNullOrBlank()) activity.sppService.connectByAddress(macAddress) else activity.sppService.connectAuto()
+        @JavascriptInterface fun disconnect() { activity.sppService.disconnect() }
+        @JavascriptInterface fun sendCommand(command: String): Boolean = activity.sppService.sendCommand(command)
+        @JavascriptInterface fun isConnected(): Boolean = activity.sppService.isConnected()
+        @JavascriptInterface fun postNotification(title: String, message: String, tag: String? = null): Boolean = activity.sendNotification(title, message, tag)
     }
 }`;
 
 export const BUILD_GRADLE_KTS = `plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -573,19 +525,30 @@ android {
         applicationId = "com.hydrosense.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
+        versionCode = 3
         versionName = "3.0.0"
     }
 
-    buildFeatures {
-        compose = true
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
     }
 }
 
 dependencies {
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.kotlinx.coroutines.android)
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.activity:activity-ktx:1.8.2")
+    implementation("androidx.webkit:webkit:1.10.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }`;

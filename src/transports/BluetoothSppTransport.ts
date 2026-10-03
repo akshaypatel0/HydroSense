@@ -5,8 +5,8 @@
  * - HC-05 uses Bluetooth Classic Serial Port Profile (SPP / RFCOMM with UUID 00001101-0000-1000-8000-00805F9B34FB).
  * - Standard Web Bluetooth (navigator.bluetooth) only supports BLE GATT and CANNOT open RFCOMM sockets to HC-05.
  * - This transport bridges to native Android Bluetooth Classic when running inside an Android container
- *   (via window.AndroidBluetooth JavascriptInterface), or provides honest, transparent error reporting and
- *   guidance when running in a standard web browser.
+ *   (via window.AndroidBluetooth / window.AndroidBridge JavascriptInterface), or provides an interactive device picker
+ *   and guidance when running in a standard web browser.
  */
 
 import { formatCommand, parseStatusLine, ProtocolStreamAccumulator } from '../protocol/protocolParser';
@@ -14,20 +14,33 @@ import { ConnectionState, OutgoingCommand } from '../types';
 import { IHardwareTransport, TransportCallbacks } from './types';
 
 // Interface for Android Native WebView JavaScript Bridge
-interface AndroidBluetoothBridge {
+export interface AndroidNativeBridge {
+  isNativeApp?(): boolean;
   connect(macAddress?: string): boolean;
   disconnect(): void;
   sendCommand(command: string): boolean;
   isConnected(): boolean;
+  getConnectedDeviceName?(): string;
   getPairedDevicesJson?(): string;
+  postNotification?(title: string, message: string, tag?: string): boolean;
+  requestBluetoothPermissions?(): void;
+  requestNotificationPermission?(): void;
+  hasBluetoothPermission?(): boolean;
+  hasNotificationPermission?(): boolean;
+}
+
+export interface PairedBluetoothDevice {
+  name: string;
+  address: string;
 }
 
 declare global {
   interface Window {
-    AndroidBluetooth?: AndroidBluetoothBridge;
-    AndroidBridge?: AndroidBluetoothBridge;
+    AndroidBluetooth?: AndroidNativeBridge;
+    AndroidBridge?: AndroidNativeBridge;
     onAndroidBluetoothData?: (data: string) => void;
     onAndroidBluetoothStatus?: (status: string, message?: string) => void;
+    onAndroidPermissionResult?: (type: string, granted: boolean) => void;
   }
 }
 
@@ -63,9 +76,33 @@ export class BluetoothSppTransport implements IHardwareTransport {
     );
   }
 
-  private getBridge(): AndroidBluetoothBridge | null {
+  public static getBridge(): AndroidNativeBridge | null {
     if (typeof window === 'undefined') return null;
     return window.AndroidBluetooth || window.AndroidBridge || null;
+  }
+
+  public static getPairedDevices(): PairedBluetoothDevice[] {
+    const bridge = BluetoothSppTransport.getBridge();
+    if (!bridge || !bridge.getPairedDevicesJson) return [];
+
+    try {
+      const json = bridge.getPairedDevicesJson();
+      if (!json) return [];
+      const parsed = JSON.parse(json);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => ({
+          name: String(item.name || 'Unknown Device'),
+          address: String(item.address || ''),
+        }));
+      }
+    } catch (e) {
+      console.error('Error fetching paired Bluetooth devices:', e);
+    }
+    return [];
+  }
+
+  private getBridge(): AndroidNativeBridge | null {
+    return BluetoothSppTransport.getBridge();
   }
 
   private setupNativeBridgeListeners(): void {
@@ -73,8 +110,6 @@ export class BluetoothSppTransport implements IHardwareTransport {
 
     // Incoming line from native Android RFCOMM stream
     window.onAndroidBluetoothData = (data: string) => {
-      if (this.state.status !== 'connected') return;
-
       this.state.bytesReceived += data.length;
       const lines = this.accumulator.pushChunk(data.includes('\n') ? data : `${data}\n`);
 
@@ -111,6 +146,7 @@ export class BluetoothSppTransport implements IHardwareTransport {
       } else if (lower === 'connecting') {
         this.updateState({
           status: 'connecting',
+          deviceName: message || 'HC-05',
           errorMessage: undefined,
         });
       } else {
@@ -130,7 +166,7 @@ export class BluetoothSppTransport implements IHardwareTransport {
     return { ...this.state };
   }
 
-  public async connect(): Promise<boolean> {
+  public async connect(macAddress?: string): Promise<boolean> {
     const bridge = this.getBridge();
 
     // 1. If running inside native Android WebView container
@@ -147,7 +183,7 @@ export class BluetoothSppTransport implements IHardwareTransport {
 
         this.setupNativeBridgeListeners();
         this.accumulator.reset();
-        const success = bridge.connect();
+        const success = bridge.connect(macAddress);
         if (!success) {
           const err = 'Failed to initiate HC-05 connection via Android native bridge.';
           this.updateState({ status: 'error', errorMessage: err });
@@ -164,9 +200,8 @@ export class BluetoothSppTransport implements IHardwareTransport {
     }
 
     // 2. Standard Web Browser Environment
-    // Honest, factual status: Web Bluetooth cannot open Bluetooth Classic RFCOMM sockets
     const errorMsg =
-      'HC-05 uses Bluetooth Classic SPP (RFCOMM). Standard web browsers (Chrome, Firefox, Safari) only support BLE and cannot open RFCOMM serial sockets directly. On Android, connect using a USB OTG cable with "Connect USB Serial" (supported directly in Chrome for Android), or run the native Android app with the included Bluetooth SPP service.';
+      'HC-05 uses Bluetooth Classic SPP (RFCOMM). Standard web browsers (Chrome, Firefox, Safari) only support BLE. Use "Connect USB Serial" for direct connection on Android with USB OTG cable, or launch the native Android APK which has full hardware SPP built in.';
 
     this.updateState({
       status: 'error',
@@ -187,11 +222,6 @@ export class BluetoothSppTransport implements IHardwareTransport {
       }
     }
 
-    if (typeof window !== 'undefined') {
-      window.onAndroidBluetoothData = undefined;
-      window.onAndroidBluetoothStatus = undefined;
-    }
-
     this.accumulator.reset();
     this.updateState({
       status: 'disconnected',
@@ -201,15 +231,15 @@ export class BluetoothSppTransport implements IHardwareTransport {
     });
   }
 
-  public async sendCommand(command: OutgoingCommand): Promise<boolean> {
+  public async sendCommand(command: OutgoingCommand | string): Promise<boolean> {
     const bridge = this.getBridge();
-    if (this.state.status !== 'connected' || !bridge) {
+    if (!bridge || !bridge.isConnected()) {
       this.callbacks.onError('Cannot send command: Bluetooth SPP is not connected.');
       return false;
     }
 
     try {
-      const formatted = formatCommand(command);
+      const formatted = typeof command === 'string' ? command : formatCommand(command);
       const success = bridge.sendCommand(formatted);
       if (success) {
         this.state.packetsSent++;

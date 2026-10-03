@@ -8,9 +8,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -19,7 +16,7 @@ import java.util.UUID
 /**
  * Native Android Bluetooth Classic RFCOMM / SPP Service for HC-05 module.
  * Standard SPP Serial Port UUID: 00001101-0000-1000-8000-00805F9B34FB
- * Features automatic connection to previously configured device on launch.
+ * Streams bidirectional serial lines between HC-05 and the HydroSense UI.
  */
 class BluetoothSPPService(
     private val context: Context,
@@ -32,163 +29,158 @@ class BluetoothSPPService(
         private const val KEY_LAST_DEVICE_MAC = "last_hc05_mac"
     }
 
-    enum class ConnectionState {
-        DISCONNECTED,
-        CONNECTING,
-        CONNECTED,
-        RECONNECTING,
-        ERROR
-    }
-
-    data class Telemetry(
-        val water: Float = 0f,
-        val status: String = "NORMAL",
-        val target: Int = 80,
-        val cutoff: Int = 90,
-        val error: String = "NONE",
-        val calEmpty: Float = 12.8f,
-        val calFull: Float = 2.1f,
-        val calStatus: String = "OK",
-        val distance: Float = 0f,
-        val buzzer: String = "OFF",
-        val timestamp: Long = System.currentTimeMillis()
-    )
+    var onRawLine: ((String) -> Unit)? = null
+    var onStatusChange: ((status: String, message: String?) -> Unit)? = null
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
-
-    private val _connectedDeviceName = MutableStateFlow<String?>(null)
-    val connectedDeviceName: StateFlow<String?> = _connectedDeviceName.asStateFlow()
-
-    private val _telemetry = MutableStateFlow<Telemetry?>(null)
-    val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
-
-    private val _lastError = MutableStateFlow<String?>(null)
-    val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     private var socket: BluetoothSocket? = null
     private var outputStream: OutputStream? = null
     private var readerScope: CoroutineScope? = null
-    private var lastConnectedDevice: BluetoothDevice? = null
+    private var connectedDevice: BluetoothDevice? = null
+    private var isCurrentlyConnected = false
+
+    fun isConnected(): Boolean = isCurrentlyConnected && socket?.isConnected == true
+
+    fun getConnectedDeviceName(): String? = connectedDevice?.name ?: connectedDevice?.address
 
     @SuppressLint("MissingPermission")
     fun getPairedDevices(): List<BluetoothDevice> {
-        return bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
+        return try {
+            bluetoothAdapter?.bondedDevices?.toList() ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error listing paired devices: ${e.message}")
+            emptyList()
+        }
     }
 
-    /**
-     * Attempts automatic connection to previously configured device if available.
-     */
     @SuppressLint("MissingPermission")
-    fun connectAuto() {
-        val lastMac = prefs.getString(KEY_LAST_DEVICE_MAC, null) ?: return
+    fun connectAuto(): Boolean {
+        val lastMac = prefs.getString(KEY_LAST_DEVICE_MAC, null)
         val paired = getPairedDevices()
-        val match = paired.find { it.address.equals(lastMac, ignoreCase = true) }
-        if (match != null) {
-            Log.d(TAG, "Auto-connecting to previously paired HC-05: ${match.name} (${match.address})")
-            connect(match)
+        if (lastMac != null) {
+            val match = paired.find { it.address.equals(lastMac, ignoreCase = true) }
+            if (match != null) {
+                Log.d(TAG, "Auto-connecting to previously saved device: ${match.name} (${match.address})")
+                connect(match)
+                return true
+            }
+        }
+
+        // Fallback: look for common HC-05 / Arduino Bluetooth device names
+        val hcDevice = paired.find {
+            val name = it.name?.uppercase() ?: ""
+            name.contains("HC-05") || name.contains("HC-06") || name.contains("HYDRO") || name.contains("ARDUINO")
+        } ?: paired.firstOrNull()
+
+        if (hcDevice != null) {
+            Log.d(TAG, "Auto-connecting to found paired device: ${hcDevice.name} (${hcDevice.address})")
+            connect(hcDevice)
+            return true
+        }
+
+        return false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connectByAddress(macAddress: String): Boolean {
+        val paired = getPairedDevices()
+        val device = paired.find { it.address.equals(macAddress, ignoreCase = true) }
+            ?: try {
+                bluetoothAdapter?.getRemoteDevice(macAddress)
+            } catch (e: Exception) {
+                null
+            }
+
+        if (device != null) {
+            connect(device)
+            return true
+        } else {
+            onStatusChange?.invoke("error", "Device with MAC $macAddress not found.")
+            return false
         }
     }
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
-        lastConnectedDevice = device
-        // Persist MAC address for subsequent auto-connections
+        connectedDevice = device
         prefs.edit().putString(KEY_LAST_DEVICE_MAC, device.address).apply()
 
         disconnect()
 
+        onStatusChange?.invoke("connecting", device.name ?: device.address)
+
         readerScope = CoroutineScope(Dispatchers.IO + Job())
         readerScope?.launch {
-            _connectionState.value = ConnectionState.CONNECTING
-            _connectedDeviceName.value = device.name ?: device.address
             try {
-                bluetoothAdapter?.cancelDiscovery()
+                try {
+                    bluetoothAdapter?.cancelDiscovery()
+                } catch (_: Exception) {}
 
+                Log.d(TAG, "Opening RFCOMM socket to: ${device.name} [${device.address}]")
                 val newSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
                 newSocket.connect()
 
                 socket = newSocket
                 outputStream = newSocket.outputStream
-                _connectionState.value = ConnectionState.CONNECTED
-                _lastError.value = null
-                Log.d(TAG, "Connected to HC-05: ${device.name} [${device.address}]")
+                isCurrentlyConnected = true
 
-                // Request initial status packet
-                sendCommand("STATUS")
+                val devLabel = device.name ?: device.address ?: "HC-05 SPP"
+                Log.d(TAG, "Connected to $devLabel")
+                onStatusChange?.invoke("connected", devLabel)
 
-                val reader = BufferedReader(InputStreamReader(newSocket.inputStream))
-                while (isActive) {
+                // Query initial status packet
+                sendCommand("STATUS\n")
+
+                val reader = BufferedReader(InputStreamReader(newSocket.inputStream, Charsets.UTF_8))
+                while (isActive && isCurrentlyConnected) {
                     val line = reader.readLine() ?: break
-                    parseIncomingLine(line.trim())
+                    val trimmed = line.trim()
+                    if (trimmed.isNotEmpty()) {
+                        onRawLine?.invoke(trimmed)
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Connection error: ${e.message}", e)
-                _lastError.value = e.message ?: "Connection lost"
-                _connectionState.value = ConnectionState.ERROR
+                Log.e(TAG, "Connection failed or lost: ${e.message}", e)
+                isCurrentlyConnected = false
+                onStatusChange?.invoke("error", e.message ?: "Bluetooth SPP connection lost")
             } finally {
                 cleanUp()
             }
         }
     }
 
-    fun sendCommand(command: String) {
-        readerScope?.launch(Dispatchers.IO) {
-            try {
-                val formatted = if (command.endsWith("\n")) command else "$command\n"
-                outputStream?.write(formatted.toByteArray(Charsets.UTF_8))
-                outputStream?.flush()
-                Log.d(TAG, "Transmitted command: $command")
-            } catch (e: Exception) {
-                Log.e(TAG, "Command failed: ${e.message}")
-            }
+    fun sendCommand(command: String): Boolean {
+        if (!isConnected()) {
+            Log.w(TAG, "Cannot send command: not connected")
+            return false
         }
-    }
 
-    private fun parseIncomingLine(line: String) {
-        if (line.startsWith("STATUS")) {
-            try {
-                val tokens = line.split(",")
-                val map = mutableMapOf<String, String>()
-                for (i in 1 until tokens.size) {
-                    val parts = tokens[i].split("=")
-                    if (parts.size == 2) {
-                        map[parts[0].trim().lowercase()] = parts[1].trim()
-                    }
-                }
-
-                val t = Telemetry(
-                    water = map["water"]?.toFloatOrNull() ?: 0f,
-                    status = map["status"]?.uppercase() ?: "NORMAL",
-                    target = map["target"]?.toIntOrNull() ?: 80,
-                    cutoff = map["cutoff"]?.toIntOrNull() ?: 90,
-                    error = map["error"]?.uppercase() ?: "NONE",
-                    calEmpty = map["empty"]?.toFloatOrNull() ?: 12.8f,
-                    calFull = map["full"]?.toFloatOrNull() ?: 2.1f,
-                    calStatus = map["cal"]?.uppercase() ?: "OK",
-                    distance = map["distance"]?.toFloatOrNull() ?: 0f,
-                    buzzer = map["buzzer"]?.uppercase() ?: "OFF",
-                    timestamp = System.currentTimeMillis()
-                )
-                _telemetry.value = t
-            } catch (e: Exception) {
-                Log.w(TAG, "Malformed line: $line", e)
-            }
+        return try {
+            val formatted = if (command.endsWith("\n")) command else "$command\n"
+            outputStream?.write(formatted.toByteArray(Charsets.UTF_8))
+            outputStream?.flush()
+            Log.d(TAG, "Sent command: ${command.trim()}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Send failed: ${e.message}")
+            false
         }
     }
 
     fun disconnect() {
+        isCurrentlyConnected = false
         readerScope?.cancel()
         cleanUp()
-        _connectionState.value = ConnectionState.DISCONNECTED
-        _connectedDeviceName.value = null
+        onStatusChange?.invoke("disconnected", null)
     }
 
     private fun cleanUp() {
+        isCurrentlyConnected = false
         try {
             outputStream?.close()
+        } catch (_: Exception) {}
+        try {
             socket?.close()
         } catch (_: Exception) {}
         outputStream = null

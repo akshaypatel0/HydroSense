@@ -20,6 +20,8 @@ import { InsightsAndLogs } from './components/InsightsAndLogs';
 import { CalibrationAndDiagnostics } from './components/CalibrationAndDiagnostics';
 import { AndroidAppGuide } from './components/AndroidAppGuide';
 import { TankSettingsModal } from './components/TankSettingsModal';
+import { BluetoothModal } from './components/BluetoothModal';
+import { notificationService, InAppToast } from './services/notificationService';
 import {
   ConnectionState,
   EventLogItem,
@@ -72,6 +74,17 @@ export default function App() {
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBluetoothModalOpen, setIsBluetoothModalOpen] = useState(false);
+  const [toasts, setToasts] = useState<InAppToast[]>([]);
+
+  useEffect(() => {
+    const unsub = notificationService.subscribeToToasts((toast) => {
+      setToasts((prev) => [...prev.slice(-2), toast]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== toast.id));
+      }, 5000);
+    });
+    return unsub;
+  }, []);
 
   // Bilingual Language State (English & Gujarati)
   const [lang, setLang] = useState<Language>(() => {
@@ -339,6 +352,9 @@ export default function App() {
         filteredWaterRef.current = null;
       }
 
+      // Evaluate for anti-spam useful notifications (target reached, low reserve, cutoff risk)
+      notificationService.evaluateTelemetry(newTelem, tankConfig.tankCapacityLiters);
+
       // Verify pending command acknowledgment against confirmed Arduino status
       setPendingCommand((currentPending) => {
         if (!currentPending) return null;
@@ -461,13 +477,20 @@ export default function App() {
   };
 
   // Connect Android HC-05 Bluetooth SPP
-  const connectBluetooth = async () => {
+  const connectBluetooth = async (macAddress?: string) => {
     if (transportRef.current) {
       await transportRef.current.disconnect();
     }
 
     const transport = new BluetoothSppTransport({
-      onStatusChange: setConnectionState,
+      onStatusChange: (status) => {
+        setConnectionState(status);
+        if (status.status === 'connected') {
+          notificationService.handleConnectionState(true, status.deviceName || 'HC-05 Bluetooth');
+        } else if (status.status === 'disconnected') {
+          notificationService.handleConnectionState(false, 'HC-05');
+        }
+      },
       onTelemetry: handleTelemetry,
       onRawLineReceived: handleRawLine,
       onError: (err) => {
@@ -510,8 +533,8 @@ export default function App() {
     transportRef.current = transport;
     testBenchRef.current = null;
 
-    addLog('info', 'SYSTEM', 'Connecting to Android HC-05 Bluetooth SPP...');
-    const success = await transport.connect();
+    addLog('info', 'SYSTEM', `Connecting to Android HC-05 Bluetooth SPP ${macAddress ? `(${macAddress})` : ''}...`);
+    const success = await transport.connect(macAddress);
     if (!success) {
       setIsBluetoothModalOpen(true);
     } else {
@@ -774,7 +797,7 @@ export default function App() {
         setActiveTab={setActiveTab}
         connectionState={connectionState}
         onConnectUsb={connectUsb}
-        onConnectBluetooth={connectBluetooth}
+        onConnectBluetooth={() => setIsBluetoothModalOpen(true)}
         onConnectTestBench={connectTestBench}
         onDisconnect={disconnectHardware}
         isDarkMode={isDarkMode}
@@ -918,80 +941,57 @@ export default function App() {
         setIsDarkMode={setIsDarkMode}
       />
 
-      {/* Bluetooth Classic SPP Architecture Explanation Modal (Requirement 2) */}
-      {isBluetoothModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-md animate-fade-in">
-          <div className="w-full max-w-md rounded-3xl border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-              <div className="flex items-center gap-2 text-cyan-600 dark:text-cyan-400 font-bold text-base">
-                <Bluetooth className="h-5 w-5" />
-                <span>Android HC-05 Connection Notice</span>
+      {/* Bluetooth Connection Manager Modal */}
+      <BluetoothModal
+        isOpen={isBluetoothModalOpen}
+        onClose={() => setIsBluetoothModalOpen(false)}
+        connectionState={connectionState}
+        onConnectMac={(mac) => connectBluetooth(mac)}
+        onDisconnect={disconnectHardware}
+        onConnectUsb={connectUsb}
+        onConnectTestBench={connectTestBench}
+        onSendPing={() => {
+          if (transportRef.current) {
+            transportRef.current.sendCommand('STATUS');
+            addLog('command', 'COMMAND', 'TX: STATUS');
+          }
+        }}
+      />
+
+      {/* Floating System & Anti-Spam Notification Toasts */}
+      {toasts.length > 0 && (
+        <div className="fixed top-16 sm:top-20 right-3 sm:right-5 z-50 flex flex-col gap-2 max-w-sm pointer-events-none">
+          {toasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`p-3.5 rounded-2xl shadow-2xl border backdrop-blur-xl pointer-events-auto flex items-start gap-2.5 transition-all animate-fade-in ${
+                toast.type === 'critical'
+                  ? 'bg-rose-950/95 text-rose-100 border-rose-500/50 shadow-rose-950/50'
+                  : toast.type === 'warning'
+                  ? 'bg-amber-950/95 text-amber-100 border-amber-500/50 shadow-amber-950/50'
+                  : toast.type === 'success'
+                  ? 'bg-emerald-950/95 text-emerald-100 border-emerald-500/50 shadow-emerald-950/50'
+                  : 'bg-slate-900/95 text-slate-100 border-slate-700/60 shadow-slate-950/50'
+              }`}
+            >
+              <div className="shrink-0 mt-0.5">
+                {toast.type === 'critical' && <AlertTriangle className="h-4 w-4 text-rose-400" />}
+                {toast.type === 'warning' && <AlertTriangle className="h-4 w-4 text-amber-400" />}
+                {toast.type === 'success' && <CheckCircle2 className="h-4 w-4 text-emerald-400" />}
+                {toast.type === 'info' && <Info className="h-4 w-4 text-cyan-400" />}
+              </div>
+              <div className="flex-1 min-w-0 text-xs">
+                <div className="font-bold leading-tight truncate">{toast.title}</div>
+                <div className="text-[11px] opacity-90 leading-snug mt-0.5">{toast.message}</div>
               </div>
               <button
-                onClick={() => setIsBluetoothModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 dark:hover:text-white"
+                onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+                className="opacity-60 hover:opacity-100 p-0.5"
               >
-                <X className="h-5 w-5" />
+                <X className="h-3.5 w-3.5" />
               </button>
             </div>
-
-            <div className="space-y-3 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              <p>
-                <strong>HC-05 uses Bluetooth Classic SPP (RFCOMM)</strong>. Standard web browsers (Chrome, Firefox, Safari) only support BLE (Bluetooth Low Energy GATT) and cannot open RFCOMM serial sockets directly due to browser security sandbox constraints.
-              </p>
-
-              <div className="p-3 rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-500/20 space-y-2">
-                <div className="font-bold text-cyan-900 dark:text-cyan-200 flex items-center gap-1.5">
-                  <Cable className="h-4 w-4" />
-                  <span>Option 1: USB OTG on Android (Instant)</span>
-                </div>
-                <p className="text-[11px] text-cyan-800 dark:text-cyan-300">
-                  Connect your Arduino Uno to your Android phone via a standard USB OTG cable. Google Chrome for Android supports the Web Serial API directly!
-                </p>
-              </div>
-
-              <div className="p-3 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2">
-                <div className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                  <Smartphone className="h-4 w-4" />
-                  <span>Option 2: Native Android App Container</span>
-                </div>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  To stream via HC-05 Bluetooth Classic without cables, run our native Android app with the included RFCOMM SPP background service. Complete Kotlin source code is provided.
-                </p>
-              </div>
-            </div>
-
-            <div className="pt-2 flex flex-col gap-2">
-              <button
-                onClick={() => {
-                  setIsBluetoothModalOpen(false);
-                  connectUsb();
-                }}
-                className="w-full py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition-colors"
-              >
-                <Cable className="h-4 w-4" />
-                <span>Connect via USB Serial (OTG)</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setIsBluetoothModalOpen(false);
-                  setActiveTab('hardware');
-                }}
-                className="w-full py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-bold text-xs flex items-center justify-center gap-2 transition-colors"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                <span>View Android Kotlin Code & Guide</span>
-              </button>
-
-              <button
-                onClick={() => setIsBluetoothModalOpen(false)}
-                className="w-full py-2 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 text-xs font-medium"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
+          ))}
         </div>
       )}
 
