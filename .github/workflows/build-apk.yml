@@ -41,13 +41,26 @@ jobs:
         distribution: 'temurin'
 
     - name: Grant Execute Permission to Gradle
-      run: chmod +x gradlew # 👈 Simplified to execute in the root directory directly
+      run: |
+        GRADLEW_PATH=$(find . -name gradlew -print -quit)
+        if [ -n "$GRADLEW_PATH" ]; then
+          chmod +x "$GRADLEW_PATH"
+          echo "Found gradlew at: $GRADLEW_PATH"
+        else
+          echo "Error: gradlew file not found anywhere in the repository!"
+          exit 1
+        fi
 
     - name: Build Android Debug APK
-      run: ./gradlew assembleDebug # 👈 Simplified to compile directly in the root folder
+      run: |
+        GRADLEW_PATH=$(find . -name gradlew -print -quit)
+        GRADLEW_DIR=$(dirname "$GRADLEW_PATH")
+        cd "$GRADLEW_DIR"
+        ./gradlew assembleDebug
 
     - name: Upload Installable APK Artifact
       uses: actions/upload-artifact@v4
       with:
         name: HydroSense-APK
-        path: app/build/outputs/apk/debug/*.apk # 👈 Corrected the path to grab the root build package
+        path: |
+          **/build/outputs/apk/debug/*.apk
