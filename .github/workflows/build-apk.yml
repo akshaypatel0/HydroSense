@@ -32,14 +32,14 @@ jobs:
       run: npm install @capacitor/assets --save-dev --legacy-peer-deps
 
     - name: Generate Single Logo Android Icons
-      run: npx @capacitor/assets generate --android # 👈 Removed the '--icon' option flag to fix the crash!
+      run: npx @capacitor/assets generate --android --asset-path ./assets # 👈 Explicitly points the tool to your assets folder
 
     - name: Set up Java JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
+        # 💡 Removed the 'cache: gradle' property that was causing the file-match crash
 
     - name: Grant Execute Permission to Gradle
       run: |
