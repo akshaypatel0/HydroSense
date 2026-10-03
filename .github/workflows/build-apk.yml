@@ -45,9 +45,9 @@ jobs:
         GRADLEW_PATH=$(find . -name gradlew -print -quit)
         if [ -n "$GRADLEW_PATH" ]; then
           chmod +x "$GRADLEW_PATH"
-          echo "Found gradlew at: $GRADLEW_PATH"
+          echo "Successfully granted execution rights to: $GRADLEW_PATH"
         else
-          echo "Error: gradlew file not found anywhere in the repository!"
+          echo "Error: gradlew file not found!"
           exit 1
         fi
 
@@ -56,6 +56,7 @@ jobs:
         GRADLEW_PATH=$(find . -name gradlew -print -quit)
         GRADLEW_DIR=$(dirname "$GRADLEW_PATH")
         cd "$GRADLEW_DIR"
+        chmod +x ./gradlew # 👈 Extra safeguard to prevent "Permission Denied" right before compilation
         ./gradlew assembleDebug
 
     - name: Upload Installable APK Artifact
@@ -64,4 +65,3 @@ jobs:
         name: HydroSense-APK
         path: |
           **/build/outputs/apk/debug/*.apk
-          
