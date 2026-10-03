@@ -357,7 +357,7 @@ export const TankVisualizer: React.FC<TankVisualizerProps> = ({
       ref={containerRef}
       className={`relative overflow-hidden rounded-3xl border border-slate-200/90 bg-white/90 p-4 sm:p-5 shadow-2xl backdrop-blur-2xl dark:border-slate-800/90 dark:bg-slate-900/90 transition-all ${
         isFullscreen
-          ? 'fixed inset-0 z-50 rounded-none p-4 sm:p-8 flex flex-col justify-between overflow-y-auto bg-slate-950 text-white min-h-[100dvh]'
+          ? 'fixed inset-0 z-50 rounded-none p-4 sm:p-8 flex flex-col justify-between overflow-y-auto bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white min-h-[100dvh]'
           : ''
       }`}
     >

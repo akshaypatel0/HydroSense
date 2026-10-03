@@ -59,7 +59,17 @@ const DEFAULT_CONFIG: TankConfig = {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('hydrosense_theme');
+      if (saved !== null) {
+        return saved === 'dark';
+      }
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true;
+    } catch {
+      return true;
+    }
+  });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBluetoothModalOpen, setIsBluetoothModalOpen] = useState(false);
 
@@ -152,12 +162,24 @@ export default function App() {
   const transportRef = useRef<IHardwareTransport | null>(null);
   const testBenchRef = useRef<TestBenchTransport | null>(null);
 
-  // Dark mode effect
+  // Theme effect: persist to localStorage and sync document.documentElement, body, and meta theme-color
   useEffect(() => {
+    try {
+      localStorage.setItem('hydrosense_theme', isDarkMode ? 'dark' : 'light');
+    } catch {}
+
+    const root = document.documentElement;
     if (isDarkMode) {
-      document.documentElement.classList.add('dark');
+      root.classList.add('dark');
+      root.classList.remove('light');
     } else {
-      document.documentElement.classList.remove('dark');
+      root.classList.remove('dark');
+      root.classList.add('light');
+    }
+
+    const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeColorMeta) {
+      themeColorMeta.setAttribute('content', isDarkMode ? '#020617' : '#f8fafc');
     }
   }, [isDarkMode]);
 
@@ -892,6 +914,8 @@ export default function App() {
         connectionState={connectionState}
         onSendCalibration={handleSendCalibration}
         lang={lang}
+        isDarkMode={isDarkMode}
+        setIsDarkMode={setIsDarkMode}
       />
 
       {/* Bluetooth Classic SPP Architecture Explanation Modal (Requirement 2) */}

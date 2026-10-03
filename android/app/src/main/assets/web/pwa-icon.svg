@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="appIconBg" cx="50%" cy="36%" r="65%">
+      <stop offset="0%" stopColor="#ffffff" />
+      <stop offset="30%" stopColor="#e0f2fe" />
+      <stop offset="65%" stopColor="#bae6fd" />
+      <stop offset="100%" stopColor="#7dd3fc" />
+    </radialGradient>
+
+    <!-- Bezel Inner Gloss -->
+    <linearGradient id="bezelGlow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.8" />
+      <stop offset="40%" stopColor="#ffffff" stopOpacity="0.1" />
+      <stop offset="100%" stopColor="#0284c7" stopOpacity="0.25" />
+    </linearGradient>
+
+    <!-- White Tank Cylindrical Shading -->
+    <linearGradient id="tankWhiteCylinder" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stopColor="#cbd5e1" />
+      <stop offset="12%" stopColor="#f1f5f9" />
+      <stop offset="32%" stopColor="#ffffff" />
+      <stop offset="70%" stopColor="#f8fafc" />
+      <stop offset="90%" stopColor="#e2e8f0" />
+      <stop offset="100%" stopColor="#94a3b8" />
+    </linearGradient>
+
+    <!-- Tank Horizontal Rib Shading -->
+    <linearGradient id="tankRibGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stopColor="#94a3b8" />
+      <stop offset="25%" stopColor="#ffffff" />
+      <stop offset="75%" stopColor="#e2e8f0" />
+      <stop offset="100%" stopColor="#64748b" />
+    </linearGradient>
+
+    <!-- Sensor Aluminum Body -->
+    <linearGradient id="sensorMetal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stopColor="#f8fafc" />
+      <stop offset="50%" stopColor="#cbd5e1" />
+      <stop offset="100%" stopColor="#64748b" />
+    </linearGradient>
+
+    <!-- Sensor Eye Rim -->
+    <radialGradient id="sensorEyeRim" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stopColor="#ffffff" />
+      <stop offset="60%" stopColor="#94a3b8" />
+      <stop offset="100%" stopColor="#334155" />
+    </radialGradient>
+
+    <!-- Water Liquid Gradient -->
+    <linearGradient id="windowWaterGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stopColor="#38bdf8" />
+      <stop offset="40%" stopColor="#0284c7" />
+      <stop offset="100%" stopColor="#0369a1" />
+    </linearGradient>
+
+    <!-- Foreground Wave Ribbon 1 (Back) -->
+    <linearGradient id="waveRibbonBack" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.45" />
+      <stop offset="100%" stopColor="#0284c7" stopOpacity="0.75" />
+    </linearGradient>
+
+    <!-- Foreground Wave Ribbon 2 (Main) -->
+    <linearGradient id="waveRibbonFront" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stopColor="#7dd3fc" />
+      <stop offset="45%" stopColor="#0284c7" />
+      <stop offset="100%" stopColor="#0369a1" />
+    </linearGradient>
+
+    <!-- School Banner Pill Gradient -->
+    <linearGradient id="schoolBannerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stopColor="#091e3a" />
+      <stop offset="50%" stopColor="#0f2b54" />
+      <stop offset="100%" stopColor="#091e3a" />
+    </linearGradient>
+
+    <clipPath id="windowClip">
+      <rect x="174" y="142" width="164" height="166" rx="22" />
+    </clipPath>
+  </defs>
+
+  <!-- 1. SQUIRCLE APP ICON CONTAINER -->
+  <rect width="512" height="512" rx="112" fill="url(#appIconBg)" />
+  <rect width="512" height="512" rx="112" fill="none" stroke="url(#bezelGlow)" stroke-width="6" />
+
+  <!-- 2. WIRELESS SIGNALS ON TOP -->
+  <g id="wirelessSignals" stroke="#0080ff" stroke-linecap="round" fill="none">
+    <path d="M 218 36 A 48 48 0 0 1 294 36" stroke-width="8.5" opacity="0.95" />
+    <path d="M 230 50 A 32 32 0 0 1 282 50" stroke-width="7.5" opacity="0.95" />
+    <path d="M 243 64 A 16 16 0 0 1 269 64" stroke-width="6.5" opacity="0.95" />
+  </g>
+
+  <!-- 3. ULTRASONIC SENSOR MODULE -->
+  <g id="sensorModule">
+    <!-- Sensor Mount Stalk to Tank -->
+    <rect x="247" y="94" width="18" height="14" rx="3" fill="#334155" />
+    <!-- Sensor PCB / Aluminum Enclosure -->
+    <rect x="208" y="64" width="96" height="34" rx="8" fill="url(#sensorMetal)" stroke="#475569" stroke-width="1.5" />
+    
+    <!-- Left Transducer Cylinder -->
+    <circle cx="233" cy="81" r="13" fill="url(#sensorEyeRim)" stroke="#1e293b" stroke-width="1.2" />
+    <circle cx="233" cy="81" r="9.5" fill="#0f172a" />
+    <circle cx="233" cy="81" r="7.5" fill="#1e293b" stroke="#334155" stroke-dasharray="2 1.5" stroke-width="0.8" />
+    <circle cx="231" cy="79" r="2.5" fill="#94a3b8" opacity="0.7" />
+
+    <!-- Right Transducer Cylinder -->
+    <circle cx="279" cy="81" r="13" fill="url(#sensorEyeRim)" stroke="#1e293b" stroke-width="1.2" />
+    <circle cx="279" cy="81" r="9.5" fill="#0f172a" />
+    <circle cx="279" cy="81" r="7.5" fill="#1e293b" stroke="#334155" stroke-dasharray="2 1.5" stroke-width="0.8" />
+    <circle cx="277" cy="79" r="2.5" fill="#94a3b8" opacity="0.7" />
+  </g>
+
+  <!-- 4. WHITE CYLINDRICAL WATER TANK -->
+  <g id="waterTank">
+    <!-- Tank Main Body -->
+    <rect x="126" y="106" width="260" height="216" rx="42" fill="url(#tankWhiteCylinder)" stroke="#cbd5e1" stroke-width="2.5" />
+
+    <!-- Top Domed Lid -->
+    <ellipse cx="256" cy="110" rx="72" ry="14" fill="url(#tankRibGrad)" stroke="#cbd5e1" stroke-width="2" />
+    <ellipse cx="256" cy="107" rx="58" ry="9" fill="#f8fafc" />
+
+    <!-- Molded Reinforcing Horizontal Rib Bands -->
+    <g id="ribs">
+      <rect x="126" y="148" width="260" height="7" rx="3.5" fill="url(#tankRibGrad)" opacity="0.9" />
+      <line x1="130" y1="149" x2="382" y2="149" stroke="#ffffff" stroke-width="1.8" opacity="0.85" />
+      <line x1="130" y1="155" x2="382" y2="155" stroke="#94a3b8" stroke-width="1.2" opacity="0.6" />
+
+      <rect x="126" y="192" width="260" height="7" rx="3.5" fill="url(#tankRibGrad)" opacity="0.9" />
+      <line x1="130" y1="193" x2="382" y2="193" stroke="#ffffff" stroke-width="1.8" opacity="0.85" />
+      <line x1="130" y1="199" x2="382" y2="199" stroke="#94a3b8" stroke-width="1.2" opacity="0.6" />
+
+      <rect x="126" y="238" width="260" height="7" rx="3.5" fill="url(#tankRibGrad)" opacity="0.9" />
+      <line x1="130" y1="239" x2="382" y2="239" stroke="#ffffff" stroke-width="1.8" opacity="0.85" />
+      <line x1="130" y1="245" x2="382" y2="245" stroke="#94a3b8" stroke-width="1.2" opacity="0.6" />
+
+      <rect x="126" y="284" width="260" height="7" rx="3.5" fill="url(#tankRibGrad)" opacity="0.9" />
+      <line x1="130" y1="285" x2="382" y2="285" stroke="#ffffff" stroke-width="1.8" opacity="0.85" />
+      <line x1="130" y1="291" x2="382" y2="291" stroke="#94a3b8" stroke-width="1.2" opacity="0.6" />
+    </g>
+
+    <!-- Left Specular Light Band on Tank Wall -->
+    <rect x="156" y="112" width="18" height="200" fill="#ffffff" opacity="0.4" />
+    <rect x="178" y="112" width="6" height="200" fill="#ffffff" opacity="0.25" />
+  </g>
+
+  <!-- 5. CLEAR FRONT INSPECTION VIEWPORT WINDOW -->
+  <g id="inspectionWindow">
+    <!-- Window Outer Bezel Frame -->
+    <rect x="172" y="140" width="168" height="170" rx="24" fill="#0c1a2e" stroke="#475569" stroke-width="3" />
+
+    <!-- Clipped Internal Liquid Contents -->
+    <g clip-path="url(#windowClip)">
+      <!-- Deep Window Chamber Background -->
+      <rect x="172" y="140" width="168" height="170" fill="#081426" />
+
+      <!-- Back Water Depth Wave -->
+      <path d="M 172 312 L 172 195 Q 212 188, 256 198 T 340 192 L 340 312 Z" fill="#0369a1" opacity="0.75" />
+
+      <!-- Primary Water Body -->
+      <path d="M 172 312 L 172 192 Q 214 200, 256 190 T 340 196 L 340 312 Z" fill="url(#windowWaterGrad)" />
+
+      <!-- Water Surface Wave Crest Specular Highlight -->
+      <path d="M 172 192 Q 214 200, 256 190 T 340 196" fill="none" stroke="#ffffff" stroke-width="2.5" opacity="0.85" />
+
+      <!-- Rising Aeration Bubbles -->
+      <circle cx="198" cy="275" r="4.5" fill="#ffffff" opacity="0.45" />
+      <circle cx="196" cy="273" r="1.5" fill="#ffffff" opacity="0.8" />
+      
+      <circle cx="232" cy="245" r="6" fill="#ffffff" opacity="0.4" />
+      <circle cx="230" cy="243" r="2" fill="#ffffff" opacity="0.8" />
+
+      <circle cx="270" cy="265" r="5" fill="#ffffff" opacity="0.45" />
+      <circle cx="268" cy="263" r="1.8" fill="#ffffff" opacity="0.8" />
+
+      <circle cx="245" cy="215" r="3.5" fill="#ffffff" opacity="0.5" />
+      <circle cx="295" cy="235" r="4" fill="#ffffff" opacity="0.45" />
+
+      <!-- Graduated Level Measurement Ruler (Right Side) -->
+      <line x1="304" y1="150" x2="304" y2="300" stroke="#ffffff" stroke-width="2" opacity="0.9" />
+      
+      <!-- Ruler Ticks -->
+      <line x1="290" y1="155" x2="304" y2="155" stroke="#ffffff" stroke-width="2.2" opacity="0.9" />
+      <line x1="296" y1="172" x2="304" y2="172" stroke="#ffffff" stroke-width="1.4" opacity="0.9" />
+      <line x1="290" y1="190" x2="304" y2="190" stroke="#ffffff" stroke-width="2.2" opacity="0.9" />
+      <line x1="296" y1="208" x2="304" y2="208" stroke="#ffffff" stroke-width="1.4" opacity="0.9" />
+      <line x1="290" y1="226" x2="304" y2="226" stroke="#ffffff" stroke-width="2.2" opacity="0.9" />
+      <line x1="296" y1="244" x2="304" y2="244" stroke="#ffffff" stroke-width="1.4" opacity="0.9" />
+      <line x1="290" y1="262" x2="304" y2="262" stroke="#ffffff" stroke-width="2.2" opacity="0.9" />
+      <line x1="296" y1="280" x2="304" y2="280" stroke="#ffffff" stroke-width="1.4" opacity="0.9" />
+      <line x1="290" y1="295" x2="304" y2="295" stroke="#ffffff" stroke-width="2.2" opacity="0.9" />
+
+      <!-- Glass Specular Reflection across window -->
+      <polygon points="174,142 220,142 186,308 174,308" fill="#ffffff" opacity="0.12" />
+    </g>
+  </g>
+
+  <!-- 6. SWEEPING FOREGROUND WATER WAVE RIBBONS -->
+  <g id="foregroundWaves">
+    <!-- Back Wave Sweep -->
+    <path
+      d="M -10 375 Q 120 310, 256 345 T 522 320 L 522 410 L -10 410 Z"
+      fill="url(#waveRibbonBack)"
+    />
+    <!-- Front Dynamic Wave Ribbon -->
+    <path
+      d="M -10 355 Q 110 330, 240 365 T 522 315 L 522 390 Q 380 405, 256 380 T -10 395 Z"
+      fill="url(#waveRibbonFront)"
+      opacity="0.9"
+    />
+    <!-- Wave Specular Highlight Edge -->
+    <path
+      d="M -10 355 Q 110 330, 240 365 T 522 315"
+      fill="none"
+      stroke="#ffffff"
+      stroke-width="3"
+      opacity="0.75"
+    />
+  </g>
+
+  <!-- 7. BRAND LOGO TYPOGRAPHY "HydroSense" -->
+  <g id="brandTypography">
+    <g transform="translate(42, 332)">
+      <!-- "Hydro" in Bold Midnight Navy -->
+      <text
+        x="0"
+        y="62"
+        font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Segoe UI', Roboto, sans-serif"
+        font-size="64"
+        font-weight="900"
+        letter-spacing="-1.5"
+        fill="#0c2340"
+      >
+        Hydro
+      </text>
+
+      <!-- Water Droplet Inside "o" in Hydro -->
+      <path
+        d="M 174 48 C 174 48, 160 67, 160 76 C 160 84, 166 90, 174 90 C 182 90, 188 84, 188 76 C 188 67, 174 48, 174 48 Z"
+        fill="#0099ff"
+      />
+      <ellipse cx="171" cy="74" rx="2" ry="3.5" fill="#ffffff" opacity="0.8" />
+
+      <!-- "Sense" in Vibrant Electric Azure Blue -->
+      <text
+        x="196"
+        y="62"
+        font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Segoe UI', Roboto, sans-serif"
+        font-size="64"
+        font-weight="900"
+        letter-spacing="-1.5"
+        fill="#0080ff"
+      >
+        Sense
+      </text>
+
+      <!-- Cyan Underline Bar below "Sense" -->
+      <rect x="198" y="74" width="170" height="6.5" rx="3.2" fill="#0080ff" />
+    </g>
+  </g>
+
+  <!-- 8. BOTTOM SCHOOL PILL BADGE -->
+  <g id="schoolBadge">
+    <!-- Dark Blue Pill Container -->
+    <rect x="44" y="418" width="424" height="48" rx="24" fill="url(#schoolBannerGrad)" stroke="#1e3a8a" stroke-width="1.5" />
+
+    <!-- Gujarati Text: "શ્રી સરકારી માધ્યમિક શાળા લાખાપર" -->
+    <text
+      x="256"
+      y="450"
+      font-family="'Noto Sans Gujarati', 'Gujarati MT', 'Shruti', system-ui, -apple-system, sans-serif"
+      font-size="20.5"
+      font-weight="700"
+      text-anchor="middle"
+      fill="#ffffff"
+      letter-spacing="0.2"
+    >
+      શ્રી સરકારી માધ્યમિક શાળા લાખાપર
+    </text>
+  </g>
+</svg>

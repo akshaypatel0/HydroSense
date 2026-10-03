@@ -11,11 +11,13 @@ import {
   HelpCircle,
   Loader2,
   Lock,
+  Moon,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
   Sliders,
   Sparkles,
+  Sun,
   Target,
   Wrench,
   X,
@@ -33,6 +35,8 @@ interface TankSettingsModalProps {
   connectionState: ConnectionState;
   onSendCalibration: (command: 'CAL_EMPTY' | 'CAL_FULL') => Promise<{ success: boolean; message: string }>;
   lang: Language;
+  isDarkMode?: boolean;
+  setIsDarkMode?: (dark: boolean) => void;
 }
 
 export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
@@ -44,6 +48,8 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
   connectionState,
   onSendCalibration,
   lang,
+  isDarkMode,
+  setIsDarkMode,
 }) => {
   const t = TRANSLATIONS[lang];
   const [activeSubTab, setActiveSubTab] = useState<'calibration' | 'capacity'>('calibration');
@@ -570,6 +576,41 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
                 className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2.5 font-mono font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-cyan-500 focus:outline-none"
               />
             </div>
+
+            {/* Appearance & Theme Selector */}
+            {setIsDarkMode && (
+              <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800/80">
+                <label className="block text-slate-700 dark:text-slate-300 font-semibold mb-2">
+                  {lang === 'gu' ? 'થીમ પસંદગી (Appearance)' : 'App Theme & Appearance'}
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsDarkMode(false)}
+                    className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-bold transition-all ${
+                      !isDarkMode
+                        ? 'border-cyan-500 bg-cyan-50 text-cyan-900 dark:bg-cyan-950 dark:text-cyan-300 shadow-sm ring-1 ring-cyan-500'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Sun className="h-4 w-4 text-amber-500" />
+                    <span>{lang === 'gu' ? 'લાઇટ થીમ' : 'Light Theme'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsDarkMode(true)}
+                    className={`flex items-center justify-center gap-2 p-2.5 rounded-xl border text-xs font-bold transition-all ${
+                      isDarkMode
+                        ? 'border-cyan-500 bg-cyan-950/60 text-cyan-300 shadow-sm ring-1 ring-cyan-500'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Moon className="h-4 w-4 text-cyan-400" />
+                    <span>{lang === 'gu' ? 'ડાર્ક થીમ' : 'Dark Theme'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="pt-3 flex items-center justify-between border-t border-slate-200/80 dark:border-slate-800/80">
               <button
