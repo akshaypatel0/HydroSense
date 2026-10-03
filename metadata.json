@@ -1,0 +1,6 @@
+{
+  "name": "HydroSense Cloud & AI – Smart Water Tank Monitoring System",
+  "description": "Production-grade dual-connectivity smart water tank telemetry, pump control, safety cutoffs, and hardware protocol manager for Arduino USB Serial and native Android HC-05 Bluetooth Classic SPP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
