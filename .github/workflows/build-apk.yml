@@ -29,10 +29,10 @@ jobs:
       run: npx cap sync android || true
 
     - name: Install Asset Tools
-      run: npm install @capacitor/assets --save-dev --legacy-peer-deps # 👈 Added the flag here to fix your new crash!
+      run: npm install @capacitor/assets --save-dev --legacy-peer-deps
 
     - name: Generate Single Logo Android Icons
-      run: npx @capacitor/assets generate --android --icon
+      run: npx @capacitor/assets generate --android # 👈 Removed the '--icon' option flag to fix the crash!
 
     - name: Set up Java JDK 17
       uses: actions/setup-java@v4
