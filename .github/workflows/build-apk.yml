@@ -32,7 +32,7 @@ jobs:
       run: npm install @capacitor/assets --save-dev --legacy-peer-deps
 
     - name: Generate Single Logo Android Icons
-      run: npx @capacitor/assets generate --android --asset-dir=assets # 👈 Changed to the correct option format
+      run: npx @capacitor/assets generate --android # 👈 Stripped away all custom flags so the tool runs in default mode
 
     - name: Set up Java JDK 17
       uses: actions/setup-java@v4
