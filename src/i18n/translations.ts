@@ -14,10 +14,30 @@ export const TRANSLATIONS = {
 
     // Navigation Tabs
     navDashboard: 'Dashboard',
-    navUsage: 'Water Usage',
+    navHome: 'Home',
+    navControl: 'Control',
+    navUsage: 'Usage',
+    navSettings: 'Settings',
     navInsights: 'Insights & Logs',
     navCalibration: 'Calibration',
     navHardware: 'Hardware & Guide',
+
+    // Motor & Auto Control
+    motor: 'MOTOR',
+    motorRunning: 'RUNNING',
+    motorStopped: 'STOPPED',
+    startMotor: 'START MOTOR',
+    stopMotor: 'STOP MOTOR',
+    modeAuto: 'MODE: AUTO',
+    modeManual: 'MODE: MANUAL',
+    manualControlActive: 'MANUAL CONTROL ACTIVE',
+    autoModeActive: 'AUTO MODE ACTIVE',
+    autoStartLevel: 'AUTO START LEVEL',
+    autoTarget: 'AUTO TARGET',
+    maxSafetyLevel: 'MAXIMUM SAFETY LEVEL (95%)',
+    btConnected: 'Bluetooth Connected',
+    btDisconnected: 'Bluetooth Disconnected',
+    reconnect: 'Reconnect',
 
     // Language Toggle
     langEn: 'English',
@@ -171,10 +191,30 @@ export const TRANSLATIONS = {
 
     // Navigation Tabs
     navDashboard: 'ડેશબોર્ડ',
-    navUsage: 'પાણીનો વપરાશ',
+    navHome: 'હોમ',
+    navControl: 'કંટ્રોલ',
+    navUsage: 'વપરાશ',
+    navSettings: 'સેટિંગ્સ',
     navInsights: 'ઇન્સાઇટ્સ અને લૉગ્સ',
     navCalibration: 'કેલિબ્રેશન',
     navHardware: 'હાર્ડવેર ગાઇડ',
+
+    // Motor & Auto Control
+    motor: 'મોટર',
+    motorRunning: 'ચાલુ છે',
+    motorStopped: 'બંધ છે',
+    startMotor: 'મોટર ચાલુ કરો',
+    stopMotor: 'મોટર બંધ કરો',
+    modeAuto: 'મોડ: ઓટો',
+    modeManual: 'મોડ: મેન્યુઅલ',
+    manualControlActive: 'મેન્યુઅલ કંટ્રોલ સક્રિય છે',
+    autoModeActive: 'ઓટો મોડ સક્રિય છે',
+    autoStartLevel: 'ઓટો સ્ટાર્ટ લેવલ',
+    autoTarget: 'ઓટો ટાર્ગેટ લેવલ',
+    maxSafetyLevel: 'મહત્તમ સુરક્ષા સ્તર (95%)',
+    btConnected: 'બ્લૂટૂથ કનેક્ટેડ',
+    btDisconnected: 'બ્લૂટૂથ ડિસ્કનેક્ટેડ',
+    reconnect: 'ફરી કનેક્ટ કરો',
 
     // Language Toggle
     langEn: 'English',

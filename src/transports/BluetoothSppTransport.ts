@@ -127,6 +127,10 @@ export class BluetoothSppTransport implements IHardwareTransport {
           this.state.hasReceivedValidTelemetry = true;
           this.callbacks.onTelemetry(result.telemetry);
           this.callbacks.onStatusChange(this.getState());
+        } else if (result.ack) {
+          this.callbacks.onAck?.(result.ack);
+        } else if (result.autoEvent) {
+          this.callbacks.onAutoEvent?.(result.autoEvent);
         } else if (result.calibrationUpdate) {
           this.callbacks.onCalibrationUpdate?.(result.calibrationUpdate);
         }
@@ -143,6 +147,10 @@ export class BluetoothSppTransport implements IHardwareTransport {
           readerActive: true,
           errorMessage: undefined,
         });
+        // Protocol Rule: When connected, immediately send STATUS\n
+        setTimeout(() => {
+          this.sendCommand('STATUS');
+        }, 150);
       } else if (lower === 'connecting') {
         this.updateState({
           status: 'connecting',

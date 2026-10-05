@@ -138,6 +138,7 @@ export const TankSettingsModal: React.FC<TankSettingsModalProps> = ({
     e.preventDefault();
     usageTracker.setDailyTarget(dailyTarget);
     onSaveConfig({
+      ...config,
       tankCapacityLiters: capacity,
       lowThresholdPercent: lowMark,
       dailyTargetLiters: dailyTarget,

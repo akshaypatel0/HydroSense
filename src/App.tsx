@@ -8,21 +8,17 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  ActiveTab,
-  TopBar,
-} from './components/TopBar';
+import { TopBar } from './components/TopBar';
 import { BottomNavBar } from './components/BottomNavBar';
-import { TankVisualizer } from './components/TankVisualizer';
-import { TelemetryCards } from './components/TelemetryCards';
-import { WaterUsageSection } from './components/WaterUsageSection';
-import { InsightsAndLogs } from './components/InsightsAndLogs';
-import { CalibrationAndDiagnostics } from './components/CalibrationAndDiagnostics';
-import { AndroidAppGuide } from './components/AndroidAppGuide';
+import { HomeScreen } from './components/HomeScreen';
+import { ControlScreen } from './components/ControlScreen';
+import { UsageScreen } from './components/UsageScreen';
+import { SettingsScreen } from './components/SettingsScreen';
 import { TankSettingsModal } from './components/TankSettingsModal';
 import { BluetoothModal } from './components/BluetoothModal';
 import { notificationService, InAppToast } from './services/notificationService';
 import {
+  ActiveNavTab,
   ConnectionState,
   EventLogItem,
   OutgoingCommand,
@@ -54,13 +50,16 @@ import {
 } from 'lucide-react';
 
 const DEFAULT_CONFIG: TankConfig = {
-  tankCapacityLiters: 500,
+  tankCapacityLiters: 1000,
   lowThresholdPercent: 25,
   dailyTargetLiters: 120,
+  autoStartLevel: 10,
+  autoTargetLevel: 80,
+  autoReconnect: true,
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveNavTab>('home');
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('hydrosense_theme');
@@ -361,12 +360,32 @@ export default function App() {
 
         let matched = false;
         if (
-          currentPending.expectedState.target &&
+          currentPending.expectedState?.motor &&
+          newTelem.motor === currentPending.expectedState.motor
+        ) {
+          matched = true;
+        } else if (
+          currentPending.expectedState?.mode &&
+          newTelem.mode === currentPending.expectedState.mode
+        ) {
+          matched = true;
+        } else if (
+          currentPending.expectedState?.autoStart !== undefined &&
+          newTelem.autoStart === currentPending.expectedState.autoStart
+        ) {
+          matched = true;
+        } else if (
+          currentPending.expectedState?.autoTarget !== undefined &&
+          newTelem.autoTarget === currentPending.expectedState.autoTarget
+        ) {
+          matched = true;
+        } else if (
+          currentPending.expectedState?.target &&
           newTelem.target === currentPending.expectedState.target
         ) {
           matched = true;
         } else if (
-          currentPending.expectedState.cutoff &&
+          currentPending.expectedState?.cutoff &&
           newTelem.cutoff === currentPending.expectedState.cutoff
         ) {
           matched = true;
@@ -441,7 +460,11 @@ export default function App() {
               water: null,
               isSensorUnavailable: false,
               status: 'NORMAL',
-              target: 90,
+              motor: 'OFF',
+              mode: 'AUTO',
+              autoStart: 10,
+              autoTarget: 80,
+              target: 80,
               cutoff: 95,
               buzzer: 'OFF',
               continuousBuzzer: false,
@@ -508,7 +531,11 @@ export default function App() {
               water: null,
               isSensorUnavailable: false,
               status: 'NORMAL',
-              target: 90,
+              motor: 'OFF',
+              mode: 'AUTO',
+              autoStart: 10,
+              autoTarget: 80,
+              target: 80,
               cutoff: 95,
               buzzer: 'OFF',
               continuousBuzzer: false,
@@ -570,7 +597,11 @@ export default function App() {
               water: null,
               isSensorUnavailable: false,
               status: 'NORMAL',
-              target: 90,
+              motor: 'OFF',
+              mode: 'AUTO',
+              autoStart: 10,
+              autoTarget: 80,
+              target: 80,
               cutoff: 95,
               buzzer: 'OFF',
               continuousBuzzer: false,
@@ -625,17 +656,29 @@ export default function App() {
   };
 
   // Send Command to Active Hardware
-  const sendCommand = async (command: OutgoingCommand): Promise<boolean> => {
+  const sendCommand = async (command: OutgoingCommand | string): Promise<boolean> => {
     if (!transportRef.current || connectionState.status !== 'connected') {
       addLog('warning', 'COMMAND', `Cannot send "${command}": No active hardware connection.`);
       return false;
     }
 
-    setLastAttemptedCommand(command);
+    setLastAttemptedCommand(command as OutgoingCommand);
     addLog('command', 'COMMAND', `Dispatched command: ${command}`);
 
     const expectedState: PendingCommand['expectedState'] = {};
-    if (command.startsWith('TARGET:')) {
+    if (command === 'MOTOR_ON') {
+      expectedState.motor = 'ON';
+    } else if (command === 'MOTOR_OFF') {
+      expectedState.motor = 'OFF';
+    } else if (command === 'MODE:AUTO') {
+      expectedState.mode = 'AUTO';
+    } else if (command === 'MODE:MANUAL') {
+      expectedState.mode = 'MANUAL';
+    } else if (command.startsWith('AUTO_START:')) {
+      expectedState.autoStart = parseInt(command.slice(11), 10);
+    } else if (command.startsWith('AUTO_TARGET:')) {
+      expectedState.autoTarget = parseInt(command.slice(12), 10);
+    } else if (command.startsWith('TARGET:')) {
       expectedState.target = parseInt(command.slice(7), 10);
     } else if (command.startsWith('CUTOFF:')) {
       expectedState.cutoff = parseInt(command.slice(7), 10);
@@ -802,8 +845,6 @@ export default function App() {
         onDisconnect={disconnectHardware}
         isDarkMode={isDarkMode}
         setIsDarkMode={setIsDarkMode}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        webSerialSupported={isWebSerialSupported}
         lang={lang}
         onToggleLanguage={toggleLanguage}
         isFullscreen={isFullscreen}
@@ -825,7 +866,7 @@ export default function App() {
               </span>
             </div>
             <button
-              onClick={() => setActiveTab('calibration')}
+              onClick={() => setActiveTab('settings')}
               className="text-[11px] font-bold underline hover:opacity-80 shrink-0"
             >
               Hardware Diagnostics →
@@ -833,89 +874,63 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 1: Live Dashboard — Realistic Physical Tank & Vital Telemetry */}
-        {activeTab === 'dashboard' && (
-          <div className="space-y-4 sm:space-y-5 animate-fade-in">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-start">
-              
-              {/* Realistic Physical Tank Visualizer (5 cols) */}
-              <div className="lg:col-span-5">
-                <TankVisualizer
-                  telemetry={telemetry}
-                  connectionStatus={connectionState.status}
-                  isStale={isStale}
-                  tankConfig={tankConfig}
-                  onUpdateConfig={handleSaveConfig}
-                  lang={lang}
-                />
-              </div>
-
-              {/* Vital Telemetry Metrics & Today's Usage Tracking (7 cols) */}
-              <div className="lg:col-span-7 space-y-4">
-                <TelemetryCards
-                  telemetry={telemetry}
-                  connectionState={connectionState}
-                  isStale={isStale}
-                  secondsSinceLastPacket={secondsSinceLastPacket}
-                  tankConfig={tankConfig}
-                  onUpdateConfig={handleSaveConfig}
-                  lang={lang}
-                  onToggleFullscreen={toggleFullscreen}
-                  isFullscreen={isFullscreen}
-                />
-              </div>
-
-            </div>
-          </div>
+        {/* SECTION 1: HOME (Live Water Level, Tank Animation, Litres & Motor Card) */}
+        {activeTab === 'home' && (
+          <HomeScreen
+            telemetry={telemetry}
+            connectionState={connectionState}
+            tankConfig={tankConfig}
+            onSendCommand={sendCommand}
+            onConnectBluetooth={() => setIsBluetoothModalOpen(true)}
+            lang={lang}
+            onNavigateToControl={() => setActiveTab('control')}
+            onNavigateToSettings={() => setActiveTab('settings')}
+          />
         )}
 
-        {/* Tab 2: Water Usage Analytics (Daily, Monthly, Custom Range) */}
+        {/* SECTION 2: CONTROL (Manual & AUTO Motor Control, Sliders & Safety Rules) */}
+        {activeTab === 'control' && (
+          <ControlScreen
+            telemetry={telemetry}
+            isConnected={connectionState.status === 'connected'}
+            tankConfig={tankConfig}
+            onUpdateConfig={handleSaveConfig}
+            onSendCommand={sendCommand}
+            lang={lang}
+          />
+        )}
+
+        {/* SECTION 3: USAGE (Water Usage Analytics, History Graph & Litres) */}
         {activeTab === 'usage' && (
-          <div className="animate-fade-in">
-            <WaterUsageSection
-              tankConfig={tankConfig}
-              lang={lang}
-              onOpenSettings={() => setIsSettingsOpen(true)}
-              onUpdateConfig={handleSaveConfig}
-            />
-          </div>
+          <UsageScreen
+            telemetry={telemetry}
+            isConnected={connectionState.status === 'connected'}
+            tankConfig={tankConfig}
+            lang={lang}
+          />
         )}
 
-        {/* Tab 3: Insights & Audit Logs */}
-        {activeTab === 'insights' && (
-          <div className="animate-fade-in">
-            <InsightsAndLogs
-              logs={logs}
-              telemetryHistory={telemetryHistory}
-              currentTelemetry={telemetry}
-              onClearLogs={() => setLogs([])}
-              lang={lang}
-            />
-          </div>
-        )}
-
-        {/* Tab 4: Calibration & Diagnostics (Technical Page) */}
-        {activeTab === 'calibration' && (
-          <div className="animate-fade-in">
-            <CalibrationAndDiagnostics
-              telemetry={telemetry}
-              connectionState={connectionState}
-              serialLines={serialLines}
-              onSendCommand={sendCommand}
-              onClearSerial={() => setSerialLines([])}
-              onInjectFault={(fault) => testBenchRef.current?.injectFault(fault)}
-              onSetSimulatedWater={(level: number) => testBenchRef.current?.setWaterLevel(level)}
-              onOpenWizard={() => setIsSettingsOpen(true)}
-              onSimulateLine={handleSimulateLine}
-            />
-          </div>
-        )}
-
-        {/* Tab 5: Hardware & Wiring Guide */}
-        {activeTab === 'hardware' && (
-          <div className="animate-fade-in">
-            <AndroidAppGuide />
-          </div>
+        {/* SECTION 4: SETTINGS (Bluetooth, Tank Capacity, Calibration, Auto Settings & Diagnostics) */}
+        {activeTab === 'settings' && (
+          <SettingsScreen
+            telemetry={telemetry}
+            connectionState={connectionState}
+            tankConfig={tankConfig}
+            onUpdateConfig={handleSaveConfig}
+            onSendCommand={sendCommand}
+            onConnectBluetooth={(mac) => {
+              if (mac) {
+                connectBluetooth(mac);
+              } else {
+                setIsBluetoothModalOpen(true);
+              }
+            }}
+            onDisconnect={disconnectHardware}
+            isDarkMode={isDarkMode}
+            setIsDarkMode={setIsDarkMode}
+            lang={lang}
+            onToggleLanguage={toggleLanguage}
+          />
         )}
 
       </main>

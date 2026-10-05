@@ -1,11 +1,11 @@
 import React from 'react';
-import { Droplets, Settings, Smartphone, Waves, Wrench } from 'lucide-react';
+import { Home, Sliders, Droplets, Settings } from 'lucide-react';
 import { Language, TRANSLATIONS } from '../i18n/translations';
-import { ActiveTab } from './TopBar';
+import { ActiveNavTab } from '../types';
 
 interface BottomNavBarProps {
-  activeTab: ActiveTab;
-  setActiveTab: (tab: ActiveTab) => void;
+  activeTab: ActiveNavTab;
+  setActiveTab: (tab: ActiveNavTab) => void;
   lang: Language;
 }
 
@@ -16,22 +16,27 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
 }) => {
   const t = TRANSLATIONS[lang];
 
-  // Clean, focused 4-tab mobile navigation without unnecessary clutter
-  const tabs: Array<{ id: ActiveTab; label: string; icon: React.FC<{ className?: string }> }> = [
-    { id: 'dashboard', label: t.navDashboard, icon: Waves },
+  // 4 Primary Navigation Sections required by HydroSense architecture:
+  // HOME | CONTROL | USAGE | SETTINGS
+  const tabs: Array<{
+    id: ActiveNavTab;
+    label: string;
+    icon: React.FC<{ className?: string }>;
+  }> = [
+    { id: 'home', label: t.navHome, icon: Home },
+    { id: 'control', label: t.navControl, icon: Sliders },
     { id: 'usage', label: t.navUsage, icon: Droplets },
-    { id: 'calibration', label: t.navCalibration, icon: Wrench },
-    { id: 'hardware', label: 'APK & Setup', icon: Smartphone },
+    { id: 'settings', label: t.navSettings, icon: Settings },
   ];
 
   return (
     <nav
-      className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200/80 bg-white/95 dark:border-slate-800/80 dark:bg-slate-950/95 backdrop-blur-2xl shadow-lg shadow-black/10 select-none"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200/90 bg-white/95 dark:border-slate-800/90 dark:bg-slate-950/95 backdrop-blur-2xl shadow-xl shadow-slate-900/10 select-none"
       style={{
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
       }}
     >
-      <div className="flex items-center justify-around h-14 sm:h-16 px-2">
+      <div className="flex items-center justify-around h-15 sm:h-16 px-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -39,15 +44,17 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 flex flex-col items-center justify-center h-full py-1.5 active:scale-95 transition-all touch-manipulation ${
+              className={`flex-1 flex flex-col items-center justify-center h-full py-1 active:scale-95 transition-all touch-manipulation ${
                 isActive
                   ? 'text-cyan-600 dark:text-cyan-400 font-bold'
                   : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 font-medium'
               }`}
             >
               <div
-                className={`relative p-1.5 rounded-xl transition-colors ${
-                  isActive ? 'bg-cyan-50 dark:bg-cyan-950/60' : 'bg-transparent'
+                className={`relative p-1.5 rounded-xl transition-all ${
+                  isActive
+                    ? 'bg-cyan-50 dark:bg-cyan-950/70 text-cyan-600 dark:text-cyan-300 shadow-sm'
+                    : 'bg-transparent text-slate-500 dark:text-slate-400'
                 }`}
               >
                 <Icon
@@ -56,12 +63,9 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({
                   }`}
                 />
               </div>
-              <span className="text-[10px] tracking-tight mt-0.5 truncate max-w-[76px] leading-tight">
+              <span className="text-[11px] tracking-tight mt-0.5 truncate max-w-[76px] leading-tight font-semibold">
                 {tab.label}
               </span>
-              {isActive && (
-                <span className="absolute bottom-1 w-6 h-0.5 rounded-full bg-cyan-600 dark:bg-cyan-400 shadow-sm shadow-cyan-500/50" />
-              )}
             </button>
           );
         })}

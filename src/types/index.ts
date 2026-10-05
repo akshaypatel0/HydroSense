@@ -1,47 +1,58 @@
 /**
- * HydroSense – Smart Water Monitor
+ * HydroSense – Smart Water Tank Monitoring & Control
  * Core Types & Data Contracts
- * Final Arduino Uno Firmware Protocol Specification (9600 baud, HC-05 & USB)
- * Pure water-level monitoring, buzzer alert, and acoustic EEPROM calibration.
- * (No pump or motor references)
+ * Arduino Uno + HC-05 Bluetooth Classic SPP at 9600 baud.
  */
 
 export type AlarmState = 'ON' | 'OFF';
+export type MotorState = 'ON' | 'OFF';
+export type ControlMode = 'AUTO' | 'MANUAL';
 
 export type WaterLevelStatus =
   | 'LOW'
   | 'NORMAL'
   | 'HIGH'
   | 'CRITICAL'
+  | 'SENSOR_ERROR'
   | 'SENSOR_ABSENT';
 
 export type CalibrationStatus = 'OK' | 'UNCALIBRATED' | 'CALIBRATING';
 
 export interface TelemetryData {
-  water: number | null;         // Direct water level percentage from Arduino (0 - 100%), or null if SENSOR:ABSENT
-  liters?: number;              // Current volume in liters (null if sensor unavailable)
-  status: WaterLevelStatus;     // LOW (0-25%), NORMAL (25-90%), HIGH (90-95%), CRITICAL (>95% or >=98.90%), SENSOR_ABSENT
-  isTankFull?: boolean;         // True if level >= 98.90% (Immediate Attention)
-  target: number;               // High warning mark (90%)
-  cutoff: number;               // Critical warning mark (95%)
-  buzzer: AlarmState;           // Hardware buzzer alert status ('ON' | 'OFF')
-  continuousBuzzer?: boolean;   // Active at >= 98.90% until measured level drops below 97.50%
-  error: string;                // 'NONE', 'SENSOR:ABSENT', etc.
-  isSensorUnavailable: boolean; // True when SENSOR:ABSENT is received
-  calStatus: CalibrationStatus; // 'OK' | 'UNCALIBRATED'
-  calEmpty: number;             // Distance in cm considered 0% empty (e.g. 14.00 cm)
-  calFull: number;              // Distance in cm considered 100% full (e.g. 2.42 cm)
-  distance?: number;            // Distance from sensor to water surface in cm (e.g. 2.74 cm)
-  timestamp: number;            // Local receipt timestamp
-  rawLine: string;              // Original newline-terminated packet
+  water: number | null;          // Direct water level percentage from Arduino (0 - 100%), null if sensor error
+  liters?: number;               // Calculated volume in litres: Level × Capacity / 100
+  distance?: number;             // Distance in cm from ultrasonic sensor (ONLY for Diagnostics)
+  motor: MotorState;             // Live motor status: 'ON' | 'OFF' confirmed by Arduino
+  mode: ControlMode;             // Control mode: 'AUTO' | 'MANUAL'
+  autoStart: number;             // Configured auto start level % (default 10%, 0-90%)
+  autoTarget: number;            // Configured auto target level % (default 80%, 1-95%)
+  status: WaterLevelStatus;      // LOW, NORMAL, HIGH, CRITICAL, SENSOR_ERROR
+  isTankFull?: boolean;          // True if level >= 95% or critical
+  target: number;                // Target mark (e.g. 80%)
+  cutoff: number;                // Safety cutoff mark (fixed at 95%)
+  buzzer: AlarmState;            // Safety buzzer status
+  continuousBuzzer?: boolean;    // Active during critical alarms
+  error: string;                 // 'NONE', 'SENSOR:ABSENT', 'SENSOR:OUT_OF_RANGE', etc.
+  isSensorUnavailable: boolean;  // True when sensor is absent or out of range
+  sensorErrorDetail?: string;    // Human-readable detail (e.g., "No ultrasonic echo detected.")
+  calStatus: CalibrationStatus;  // 'OK' | 'UNCALIBRATED'
+  calEmpty: number;              // Empty tank distance in cm
+  calFull: number;               // Full tank distance in cm
+  timestamp: number;             // Local receipt timestamp
+  rawLine: string;               // Original raw packet received
+  autoEvent?: string;            // e.g. "AUTO:MOTOR_ON", "AUTO:MOTOR_OFF:TARGET_REACHED", etc.
 }
 
 export type OutgoingCommand =
+  | 'MOTOR_ON'
+  | 'MOTOR_OFF'
+  | 'MODE:AUTO'
+  | 'MODE:MANUAL'
+  | `AUTO_START:${number}`
+  | `AUTO_TARGET:${number}`
   | 'CAL_EMPTY'
   | 'CAL_FULL'
-  | 'STATUS'
-  | `TARGET:${number}`
-  | `CUTOFF:${number}`;
+  | 'STATUS';
 
 export type TransportType = 'bluetooth_spp' | 'usb_serial' | 'test_bench';
 
@@ -72,9 +83,12 @@ export interface ConnectionState {
 }
 
 export interface TankConfig {
-  tankCapacityLiters: number;   // Max water capacity in liters (default 500 L or user configured)
-  lowThresholdPercent: number;  // Low visual threshold mark (e.g. 25%)
-  dailyTargetLiters?: number;   // Optional daily water usage goal in liters (e.g. 120 L)
+  tankCapacityLiters: number;    // Tank capacity in litres (500L, 750L, 1000L, etc.)
+  lowThresholdPercent: number;   // Low visual threshold mark (e.g. 25%)
+  dailyTargetLiters?: number;    // Optional daily water usage goal in litres
+  autoStartLevel: number;        // Auto start level % (default 10%)
+  autoTargetLevel: number;       // Auto target level % (default 80%, max 95%)
+  autoReconnect: boolean;        // Whether to automatically reconnect to HC-05
 }
 
 export type LogSeverity = 'info' | 'warning' | 'critical' | 'command';
@@ -90,12 +104,18 @@ export interface EventLogItem {
 
 export interface PendingCommand {
   id: string;
-  command: OutgoingCommand;
+  command: OutgoingCommand | string;
   sentAt: number;
-  expectedState: {
+  expectedState?: {
+    motor?: MotorState;
+    mode?: ControlMode;
+    autoStart?: number;
+    autoTarget?: number;
     target?: number;
     cutoff?: number;
     calibration?: 'empty' | 'full';
   };
   timeoutTimer?: number;
 }
+
+export type ActiveNavTab = 'home' | 'control' | 'usage' | 'settings';

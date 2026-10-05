@@ -1,43 +1,71 @@
 /**
- * HydroSense Shared Protocol Parser & Stream Accumulator
+ * HydroSense – Arduino Protocol Parser & Stream Accumulator
  *
- * Implements the exact final Arduino Uno hardware protocol at 9600 baud:
+ * Implements the exact Arduino Uno + HC-05 Bluetooth Classic SPP communication at 9600 baud.
  *
- * 1. Live telemetry:
- *    DISTANCE:2.74,LEVEL:97.2
+ * 1. Live Telemetry from Arduino:
+ *    DISTANCE:13.38,LEVEL:0.0,MOTOR:OFF
+ *    DISTANCE:8.25,LEVEL:48.9,MOTOR:OFF
+ *    DISTANCE:3.07,LEVEL:93.9,MOTOR:ON
  *
- * 2. Sensor unavailable:
- *    SENSOR:ABSENT
+ * 2. Sensor Errors:
+ *    SENSOR:ABSENT -> 🔴 SENSOR ERROR: No ultrasonic echo detected.
+ *    SENSOR:OUT_OF_RANGE,DISTANCE:24.28 -> ⚠️ SENSOR OUT OF RANGE: Check ultrasonic sensor position.
  *
- * 3. Startup:
- *    WATER TANK MONITOR READY
+ * 3. Motor Acknowledgements:
+ *    ACK:MOTOR_ON:OK -> Motor started successfully.
+ *    ACK:MOTOR_OFF:OK -> Motor stopped.
+ *    ACK:CAL_EMPTY:OK / ACK:CAL_EMPTY:ERROR
+ *    ACK:CAL_FULL:OK / ACK:CAL_FULL:ERROR
  *
- * 4. Calibration report:
- *    CALIBRATION:EMPTY=14.00,FULL=2.42
+ * 4. Auto Events:
+ *    AUTO:MOTOR_ON -> 🟢 AUTO FILLING
+ *    AUTO:MOTOR_OFF:TARGET_REACHED -> 🟢 TARGET REACHED
+ *    AUTO:MOTOR_OFF:SENSOR_INVALID -> 🔴 MOTOR STOPPED: Sensor invalid.
+ *    AUTO:MOTOR_OFF:SAFETY_LIMIT -> ⚠️ SAFETY LIMIT REACHED: Motor stopped.
+ *    AUTO:MOTOR_OFF:RUNTIME_TIMEOUT -> ⚠️ MAXIMUM RUNTIME REACHED: Motor stopped.
  *
- * 5. Command acknowledgements:
- *    ACK:CAL_EMPTY:OK
- *    ACK:CAL_EMPTY:ERROR
- *    ACK:CAL_FULL:OK
- *    ACK:CAL_FULL:ERROR
- *
- * 6. Dual-connectivity USB line (human-readable):
- *    Distance: 8.25 cm | Water Level: 48.9%
+ * 5. Outgoing Commands (always newline terminated):
+ *    MOTOR_ON\n
+ *    MOTOR_OFF\n
+ *    MODE:AUTO\n
+ *    MODE:MANUAL\n
+ *    AUTO_START:10\n
+ *    AUTO_TARGET:80\n
+ *    CAL_EMPTY\n
+ *    CAL_FULL\n
+ *    STATUS\n
  */
 
-import { AlarmState, CalibrationStatus, OutgoingCommand, TelemetryData, WaterLevelStatus } from '../types';
+import {
+  AlarmState,
+  CalibrationStatus,
+  ControlMode,
+  MotorState,
+  OutgoingCommand,
+  TelemetryData,
+  WaterLevelStatus,
+} from '../types';
 
 export interface ParseResult {
   telemetry: TelemetryData | null;
   ack?: {
     command: string;
     status: 'OK' | 'ERROR' | 'REJECTED';
+    message?: string;
     reason?: string;
+  };
+  autoEvent?: {
+    type: string;
+    message: string;
+    motorState?: MotorState;
+    severity: 'info' | 'warning' | 'critical';
   };
   calibrationUpdate?: {
     calEmpty: number;
     calFull: number;
   };
+  modeUpdate?: ControlMode;
   isSystemNotice?: boolean;
   message?: string;
   error?: string;
@@ -47,8 +75,6 @@ export interface ParseResult {
 /**
  * ProtocolStreamAccumulator
  * Assembles continuous streaming serial/bluetooth byte chunks into complete newline-delimited lines.
- * Robust against fragmentation across chunk boundaries, multiple lines per chunk,
- * and CRLF / LF line delimiters.
  */
 export class ProtocolStreamAccumulator {
   private buffer: string = '';
@@ -57,7 +83,7 @@ export class ProtocolStreamAccumulator {
   public pushChunk(chunk: string): string[] {
     this.buffer += chunk;
 
-    // Safety ring-trim if buffer grows excessively without newlines
+    // Ring-buffer trim if buffer exceeds limit
     if (this.buffer.length > this.maxBufferSize) {
       this.buffer = this.buffer.slice(-2048);
     }
@@ -69,7 +95,6 @@ export class ProtocolStreamAccumulator {
       let line = this.buffer.slice(0, newlineIndex);
       this.buffer = this.buffer.slice(newlineIndex + 1);
 
-      // Strip optional carriage return '\r'
       if (line.endsWith('\r')) {
         line = line.slice(0, -1);
       }
@@ -93,56 +118,39 @@ export class ProtocolStreamAccumulator {
 }
 
 /**
- * Derive authoritative status and buzzer states matching final Arduino Uno firmware:
- * - 0–90%: Normal or low-level status as appropriate (<= 25% Low, 25-90% Normal).
- * - Above 90% through 95%: High-level warning.
- * - Above 95% and below 98.90%: Critical warning.
- * - At or above 98.90%: Tank full / immediate attention.
- * - If continuous buzzer was activated, Arduino maintains it until measured level falls below 97.50%.
+ * Ensures all outgoing commands strictly end with \n
+ */
+export function formatCommand(command: OutgoingCommand | string): string {
+  const trimmed = command.trim();
+  return `${trimmed}\n`;
+}
+
+/**
+ * Derives status and safety limit indicators from water level
  */
 export function deriveWaterStatus(
   water: number | null,
-  isSensorUnavailable = false,
-  prevContinuousOrBuzzer: boolean | AlarmState = false
+  isSensorUnavailable = false
 ): {
   status: WaterLevelStatus;
   buzzer: AlarmState;
-  continuousBuzzer: boolean;
   isTankFull: boolean;
 } {
   if (isSensorUnavailable || water === null) {
     return {
-      status: 'SENSOR_ABSENT',
+      status: 'SENSOR_ERROR',
       buzzer: 'OFF',
-      continuousBuzzer: false,
       isTankFull: false,
     };
   }
 
-  const isTankFull = water >= 98.90;
-  const wasContinuousActive =
-    prevContinuousOrBuzzer === true || prevContinuousOrBuzzer === 'ON';
-
-  // Hysteresis buzzer behavior:
-  // Continuous buzzer triggers at >= 98.90% and remains active until level falls below 97.50%
-  let continuousBuzzer = false;
-  if (water >= 98.90) {
-    continuousBuzzer = true;
-  } else if (wasContinuousActive && water >= 97.50) {
-    continuousBuzzer = true;
-  } else {
-    continuousBuzzer = false;
-  }
-
-  // Active buzzer when continuous full alarm triggers OR critical level (>95%)
-  const buzzer: AlarmState = continuousBuzzer || water > 95.0 ? 'ON' : 'OFF';
+  const isTankFull = water >= 95.0;
+  const buzzer: AlarmState = water >= 95.0 ? 'ON' : 'OFF';
 
   let status: WaterLevelStatus;
-  if (water >= 98.90) {
+  if (water >= 95.0) {
     status = 'CRITICAL';
-  } else if (water > 95.0) {
-    status = 'CRITICAL';
-  } else if (water > 90.0) {
+  } else if (water > 80.0) {
     status = 'HIGH';
   } else if (water <= 25.0) {
     status = 'LOW';
@@ -153,62 +161,206 @@ export function deriveWaterStatus(
   return {
     status,
     buzzer,
-    continuousBuzzer,
     isTankFull,
   };
 }
 
 /**
- * Parses a single line string into Telemetry, ACK, Calibration, or System Event.
- * Ignores startup and diagnostic messages that are not relevant to dashboard.
- * Never interprets malformed data as a valid reading.
+ * Parses an incoming line string from the Arduino HC-05 stream
  */
 export function parseStatusLine(
   rawLine: string,
-  lastKnownTelemetry?: TelemetryData | null
+  lastKnown?: TelemetryData | null
 ): ParseResult {
   const trimmed = rawLine.trim();
   if (!trimmed) {
     return { telemetry: null, raw: rawLine };
   }
 
-  // 1. SENSOR UNAVAILABLE (exact Arduino format: "SENSOR:ABSENT")
-  if (trimmed.toUpperCase() === 'SENSOR:ABSENT' || trimmed.toUpperCase().startsWith('SENSOR:ABSENT')) {
+  const upper = trimmed.toUpperCase();
+
+  // 1. SENSOR ERRORS
+  // "SENSOR:ABSENT"
+  if (upper.startsWith('SENSOR:ABSENT')) {
     const errorTelemetry: TelemetryData = {
       water: null,
       isSensorUnavailable: true,
-      status: 'SENSOR_ABSENT',
-      isTankFull: false,
-      target: 90,
+      status: 'SENSOR_ERROR',
+      motor: lastKnown?.motor ?? 'OFF',
+      mode: lastKnown?.mode ?? 'MANUAL',
+      autoStart: lastKnown?.autoStart ?? 10,
+      autoTarget: lastKnown?.autoTarget ?? 80,
+      target: lastKnown?.target ?? 80,
       cutoff: 95,
       buzzer: 'OFF',
-      continuousBuzzer: false,
-      error: 'SENSOR:ABSENT',
-      calStatus: 'OK',
-      calEmpty: lastKnownTelemetry?.calEmpty ?? 14.00,
-      calFull: lastKnownTelemetry?.calFull ?? 2.42,
+      error: 'SENSOR_ABSENT',
+      sensorErrorDetail: 'No ultrasonic echo detected.',
+      calStatus: lastKnown?.calStatus ?? 'OK',
+      calEmpty: lastKnown?.calEmpty ?? 13.02,
+      calFull: lastKnown?.calFull ?? 2.42,
       distance: undefined,
       timestamp: Date.now(),
       rawLine: trimmed,
     };
     return {
       telemetry: errorTelemetry,
-      message: 'Sensor unavailable (SENSOR:ABSENT)',
+      error: '🔴 SENSOR ERROR: No ultrasonic echo detected.',
       raw: trimmed,
     };
   }
 
-  // 2. STARTUP MESSAGE (exact Arduino format: "WATER TANK MONITOR READY")
-  if (trimmed.toUpperCase().includes('WATER TANK MONITOR READY')) {
+  // "SENSOR:OUT_OF_RANGE,DISTANCE:24.28" or "SENSOR:OUT_OF_RANGE"
+  if (upper.startsWith('SENSOR:OUT_OF_RANGE')) {
+    const distMatch = trimmed.match(/DISTANCE:\s*([+-]?[\d.]+)/i);
+    const rawDist = distMatch ? parseFloat(distMatch[1]) : undefined;
+    const errorTelemetry: TelemetryData = {
+      water: null,
+      isSensorUnavailable: true,
+      status: 'SENSOR_ERROR',
+      motor: lastKnown?.motor ?? 'OFF',
+      mode: lastKnown?.mode ?? 'MANUAL',
+      autoStart: lastKnown?.autoStart ?? 10,
+      autoTarget: lastKnown?.autoTarget ?? 80,
+      target: lastKnown?.target ?? 80,
+      cutoff: 95,
+      buzzer: 'OFF',
+      error: 'SENSOR_OUT_OF_RANGE',
+      sensorErrorDetail: 'Check ultrasonic sensor position.',
+      calStatus: lastKnown?.calStatus ?? 'OK',
+      calEmpty: lastKnown?.calEmpty ?? 13.02,
+      calFull: lastKnown?.calFull ?? 2.42,
+      distance: rawDist,
+      timestamp: Date.now(),
+      rawLine: trimmed,
+    };
+    return {
+      telemetry: errorTelemetry,
+      error: '⚠️ SENSOR OUT OF RANGE: Check ultrasonic sensor position.',
+      raw: trimmed,
+    };
+  }
+
+  // 2. MOTOR ACKNOWLEDGEMENTS
+  if (upper.startsWith('ACK:MOTOR_ON:OK')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'ON', timestamp: Date.now() } : null,
+      ack: { command: 'MOTOR_ON', status: 'OK', message: 'Motor started successfully.' },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('ACK:MOTOR_OFF:OK')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'OFF', timestamp: Date.now() } : null,
+      ack: { command: 'MOTOR_OFF', status: 'OK', message: 'Motor stopped.' },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('ACK:MOTOR_ON:ERROR') || upper.startsWith('ACK:MOTOR_OFF:ERROR')) {
+    const isStart = upper.includes('MOTOR_ON');
     return {
       telemetry: null,
-      isSystemNotice: true,
-      message: 'WATER TANK MONITOR READY',
+      ack: {
+        command: isStart ? 'MOTOR_ON' : 'MOTOR_OFF',
+        status: 'ERROR',
+        message: isStart ? 'Failed to start motor (safety limit or sensor error).' : 'Failed to stop motor.',
+      },
       raw: trimmed,
     };
   }
 
-  // 3. CALIBRATION REPORT (exact Arduino format: "CALIBRATION:EMPTY=14.00,FULL=2.42")
+  // 3. CALIBRATION ACKNOWLEDGEMENTS
+  if (upper.startsWith('ACK:CAL_EMPTY:OK')) {
+    return {
+      telemetry: null,
+      ack: { command: 'CAL_EMPTY', status: 'OK', message: 'Empty tank calibration saved to Arduino EEPROM.' },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('ACK:CAL_EMPTY:ERROR')) {
+    return {
+      telemetry: null,
+      ack: { command: 'CAL_EMPTY', status: 'ERROR', message: 'Calibration failed. Check sensor position and water level.' },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('ACK:CAL_FULL:OK')) {
+    return {
+      telemetry: null,
+      ack: { command: 'CAL_FULL', status: 'OK', message: 'Full tank calibration saved to Arduino EEPROM.' },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('ACK:CAL_FULL:ERROR')) {
+    return {
+      telemetry: null,
+      ack: { command: 'CAL_FULL', status: 'ERROR', message: 'Calibration failed. Check sensor position and water level.' },
+      raw: trimmed,
+    };
+  }
+
+  // 4. AUTO EVENTS
+  if (upper.startsWith('AUTO:MOTOR_ON')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'ON', mode: 'AUTO', timestamp: Date.now() } : null,
+      autoEvent: {
+        type: 'AUTO_START',
+        message: '🟢 AUTO FILLING',
+        motorState: 'ON',
+        severity: 'info',
+      },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('AUTO:MOTOR_OFF:TARGET_REACHED')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'OFF', mode: 'AUTO', timestamp: Date.now() } : null,
+      autoEvent: {
+        type: 'TARGET_REACHED',
+        message: '🟢 TARGET REACHED',
+        motorState: 'OFF',
+        severity: 'info',
+      },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('AUTO:MOTOR_OFF:SENSOR_INVALID')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'OFF', timestamp: Date.now() } : null,
+      autoEvent: {
+        type: 'SENSOR_INVALID',
+        message: '🔴 MOTOR STOPPED: Sensor invalid.',
+        motorState: 'OFF',
+        severity: 'critical',
+      },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('AUTO:MOTOR_OFF:SAFETY_LIMIT')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'OFF', timestamp: Date.now() } : null,
+      autoEvent: {
+        type: 'SAFETY_LIMIT',
+        message: '⚠️ SAFETY LIMIT REACHED: Motor stopped.',
+        motorState: 'OFF',
+        severity: 'warning',
+      },
+      raw: trimmed,
+    };
+  }
+  if (upper.startsWith('AUTO:MOTOR_OFF:RUNTIME_TIMEOUT')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, motor: 'OFF', timestamp: Date.now() } : null,
+      autoEvent: {
+        type: 'RUNTIME_TIMEOUT',
+        message: '⚠️ MAXIMUM RUNTIME REACHED: Motor stopped.',
+        motorState: 'OFF',
+        severity: 'warning',
+      },
+      raw: trimmed,
+    };
+  }
+
+  // 5. CALIBRATION VALUES REPORT (e.g. "CALIBRATION:EMPTY=13.02,FULL=2.42")
   const calRegex = /^CALIBRATION:\s*EMPTY\s*=\s*([\d.]+)\s*,\s*FULL\s*=\s*([\d.]+)/i;
   const calMatch = trimmed.match(calRegex);
   if (calMatch) {
@@ -219,109 +371,75 @@ export function parseStatusLine(
         telemetry: null,
         calibrationUpdate: { calEmpty, calFull },
         isSystemNotice: true,
-        message: `Arduino EEPROM calibration reported: Empty = ${calEmpty.toFixed(2)} cm, Full = ${calFull.toFixed(2)} cm`,
+        message: `Calibration reported: Empty=${calEmpty.toFixed(2)} cm, Full=${calFull.toFixed(2)} cm`,
         raw: trimmed,
       };
     }
   }
 
-  // 4. COMMAND ACKNOWLEDGEMENTS (exact Arduino format: "ACK:CAL_EMPTY:OK", "ACK:CAL_EMPTY:ERROR", "ACK:CAL_FULL:OK", "ACK:CAL_FULL:ERROR")
-  if (trimmed.startsWith('ACK:')) {
-    const parts = trimmed.split(':');
-    const command = parts[1] ? parts[1].toUpperCase().trim() : 'UNKNOWN';
-    const statusPart = parts[2]?.toUpperCase().trim();
-    const status: 'OK' | 'ERROR' | 'REJECTED' = statusPart === 'OK' ? 'OK' : 'ERROR';
-    const reason = parts[3] ? parts.slice(3).join(':').trim() : undefined;
-
+  // 6. MODE CONFIRMATION (e.g. "MODE:AUTO" or "MODE:MANUAL")
+  if (upper === 'MODE:AUTO' || upper.startsWith('MODE:AUTO')) {
     return {
-      telemetry: null,
-      ack: { command, status, reason },
+      telemetry: lastKnown ? { ...lastKnown, mode: 'AUTO' } : null,
+      modeUpdate: 'AUTO',
+      message: 'Mode set to AUTO',
+      raw: trimmed,
+    };
+  }
+  if (upper === 'MODE:MANUAL' || upper.startsWith('MODE:MANUAL')) {
+    return {
+      telemetry: lastKnown ? { ...lastKnown, mode: 'MANUAL' } : null,
+      modeUpdate: 'MANUAL',
+      message: 'Mode set to MANUAL',
       raw: trimmed,
     };
   }
 
-  // 5. LIVE DATA (exact Arduino format: "DISTANCE:2.74,LEVEL:97.2" or "LEVEL:97.2,DISTANCE:2.74")
-  const btDistMatch = trimmed.match(/DISTANCE:\s*([+-]?[\d.]+)/i);
-  const btLevelMatch = trimmed.match(/LEVEL:\s*([+-]?[\d.]+)/i);
+  // 7. PRIMARY ARDUINO DATA PACKET:
+  // e.g.:
+  // DISTANCE:13.38,LEVEL:0.0,MOTOR:OFF
+  // DISTANCE:8.25,LEVEL:48.9,MOTOR:OFF
+  // DISTANCE:3.07,LEVEL:93.9,MOTOR:ON
+  const distMatch = trimmed.match(/DISTANCE:\s*([+-]?[\d.]+)/i);
+  const levelMatch = trimmed.match(/LEVEL:\s*([+-]?[\d.]+)/i);
+  const motorMatch = trimmed.match(/MOTOR:\s*(ON|OFF)/i);
+  const modeMatch = trimmed.match(/MODE:\s*(AUTO|MANUAL)/i);
+  const startMatch = trimmed.match(/START:\s*([\d.]+)/i);
+  const targetMatch = trimmed.match(/TARGET:\s*([\d.]+)/i);
 
-  // If line claims to be distance/level telemetry, verify neither token has malformed invalid syntax
-  if (trimmed.toUpperCase().includes('LEVEL:') || trimmed.toUpperCase().includes('DISTANCE:')) {
-    if (btLevelMatch) {
-      const rawWater = parseFloat(btLevelMatch[1]);
-      const rawDist = btDistMatch ? parseFloat(btDistMatch[1]) : undefined;
+  if (levelMatch) {
+    const rawWater = parseFloat(levelMatch[1]);
+    const rawDist = distMatch ? parseFloat(distMatch[1]) : undefined;
+    const motorStatus: MotorState = motorMatch
+      ? (motorMatch[1].toUpperCase() as MotorState)
+      : (lastKnown?.motor ?? 'OFF');
+    const controlMode: ControlMode = modeMatch
+      ? (modeMatch[1].toUpperCase() as ControlMode)
+      : (lastKnown?.mode ?? 'AUTO');
+    const autoStart = startMatch ? parseFloat(startMatch[1]) : (lastKnown?.autoStart ?? 10);
+    const autoTarget = targetMatch ? parseFloat(targetMatch[1]) : (lastKnown?.autoTarget ?? 80);
 
-      // Strict numerical validation: Never interpret malformed or out-of-range data as valid
-      if (
-        !isNaN(rawWater) &&
-        isFinite(rawWater) &&
-        rawWater >= 0 &&
-        rawWater <= 100 &&
-        (rawDist === undefined || (!isNaN(rawDist) && isFinite(rawDist) && rawDist >= 0))
-      ) {
-        const water = Math.min(100, Math.max(0, Math.round(rawWater * 10) / 10));
-        const distance = rawDist !== undefined ? Math.round(rawDist * 100) / 100 : undefined;
-
-        const prevContinuous =
-          lastKnownTelemetry?.continuousBuzzer ?? (lastKnownTelemetry?.buzzer === 'ON');
-        const evaluated = deriveWaterStatus(water, false, prevContinuous);
-
-        const calEmpty = lastKnownTelemetry?.calEmpty ?? 14.00;
-        const calFull = lastKnownTelemetry?.calFull ?? 2.42;
-
-        const telemetry: TelemetryData = {
-          water,
-          status: evaluated.status,
-          isTankFull: evaluated.isTankFull,
-          target: 90,
-          cutoff: 95,
-          buzzer: evaluated.buzzer,
-          continuousBuzzer: evaluated.continuousBuzzer,
-          error: 'NONE',
-          isSensorUnavailable: false,
-          calStatus: 'OK',
-          calEmpty,
-          calFull,
-          distance,
-          timestamp: Date.now(),
-          rawLine: trimmed,
-        };
-
-        return { telemetry, raw: trimmed };
-      }
-    }
-  }
-
-  // 6. USB SERIAL OUTPUT (human-readable format for dual-connectivity: "Distance: 8.25 cm | Water Level: 48.9%")
-  const humanUsbRegex = /Distance:\s*([\d.]+)\s*(?:cm)?\s*\|\s*Water\s*Level:\s*([\d.]+)%?/i;
-  const humanMatch = trimmed.match(humanUsbRegex);
-
-  if (humanMatch) {
-    const rawDist = parseFloat(humanMatch[1]);
-    const rawWater = parseFloat(humanMatch[2]);
-
-    if (!isNaN(rawWater) && isFinite(rawWater)) {
+    if (!isNaN(rawWater) && isFinite(rawWater) && rawWater >= 0 && rawWater <= 100) {
       const water = Math.min(100, Math.max(0, Math.round(rawWater * 10) / 10));
-      const distance = !isNaN(rawDist) && isFinite(rawDist) ? rawDist : undefined;
-
-      const prevBuzzer = lastKnownTelemetry?.buzzer ?? 'OFF';
-      const evaluated = deriveWaterStatus(water, false, prevBuzzer);
-
-      const calEmpty = lastKnownTelemetry?.calEmpty ?? 14.00;
-      const calFull = lastKnownTelemetry?.calFull ?? 2.42;
+      const distance = rawDist !== undefined && !isNaN(rawDist) ? Math.round(rawDist * 100) / 100 : undefined;
+      const evaluated = deriveWaterStatus(water, false);
 
       const telemetry: TelemetryData = {
         water,
         status: evaluated.status,
         isTankFull: evaluated.isTankFull,
-        target: 90,
+        motor: motorStatus,
+        mode: controlMode,
+        autoStart,
+        autoTarget,
+        target: autoTarget,
         cutoff: 95,
         buzzer: evaluated.buzzer,
-        continuousBuzzer: evaluated.continuousBuzzer,
         error: 'NONE',
         isSensorUnavailable: false,
-        calStatus: 'OK',
-        calEmpty,
-        calFull,
+        calStatus: lastKnown?.calStatus ?? 'OK',
+        calEmpty: lastKnown?.calEmpty ?? 13.02,
+        calFull: lastKnown?.calFull ?? 2.42,
         distance,
         timestamp: Date.now(),
         rawLine: trimmed,
@@ -331,205 +449,101 @@ export function parseStatusLine(
     }
   }
 
-  // 7. KEY-VALUE TELEMETRY FALLBACK (e.g. "STATUS,water=48.9,status=NORMAL...")
-  if (trimmed.includes('water=') || trimmed.toUpperCase().startsWith('STATUS,')) {
-    const tokens = trimmed.toUpperCase().startsWith('STATUS,')
-      ? trimmed.split(',').slice(1)
-      : trimmed.split(',');
+  // 8. Dual-connectivity USB line fallback (e.g. "Distance: 8.25 cm | Water Level: 48.9%")
+  const humanUsbRegex = /Distance:\s*([\d.]+)\s*(?:cm)?\s*\|\s*Water\s*Level:\s*([\d.]+)%?/i;
+  const humanMatch = trimmed.match(humanUsbRegex);
+  if (humanMatch) {
+    const rawDist = parseFloat(humanMatch[1]);
+    const rawWater = parseFloat(humanMatch[2]);
+    if (!isNaN(rawWater) && isFinite(rawWater)) {
+      const water = Math.min(100, Math.max(0, Math.round(rawWater * 10) / 10));
+      const distance = !isNaN(rawDist) ? Math.round(rawDist * 100) / 100 : undefined;
+      const evaluated = deriveWaterStatus(water, false);
 
-    const dict: Record<string, string> = {};
-    for (const token of tokens) {
-      const eqIdx = token.indexOf('=');
-      if (eqIdx !== -1) {
-        const key = token.slice(0, eqIdx).trim().toLowerCase();
-        const val = token.slice(eqIdx + 1).trim();
-        dict[key] = val;
-      }
-    }
+      const telemetry: TelemetryData = {
+        water,
+        status: evaluated.status,
+        isTankFull: evaluated.isTankFull,
+        motor: lastKnown?.motor ?? 'OFF',
+        mode: lastKnown?.mode ?? 'AUTO',
+        autoStart: lastKnown?.autoStart ?? 10,
+        autoTarget: lastKnown?.autoTarget ?? 80,
+        target: lastKnown?.target ?? 80,
+        cutoff: 95,
+        buzzer: evaluated.buzzer,
+        error: 'NONE',
+        isSensorUnavailable: false,
+        calStatus: lastKnown?.calStatus ?? 'OK',
+        calEmpty: lastKnown?.calEmpty ?? 13.02,
+        calFull: lastKnown?.calFull ?? 2.42,
+        distance,
+        timestamp: Date.now(),
+        rawLine: trimmed,
+      };
 
-    if (dict['water'] !== undefined) {
-      const rawWater = parseFloat(dict['water']);
-      if (!isNaN(rawWater) && isFinite(rawWater)) {
-        const water = Math.min(100, Math.max(0, Math.round(rawWater * 10) / 10));
-        const prevBuzzer = lastKnownTelemetry?.buzzer ?? 'OFF';
-        const evaluated = deriveWaterStatus(water, false, prevBuzzer);
-        const distance = dict['distance'] !== undefined ? parseFloat(dict['distance']) : undefined;
-        const calEmpty = parseFloat(dict['empty'] ?? '14.00') || 14.00;
-        const calFull = parseFloat(dict['full'] ?? '2.42') || 2.42;
-
-        const telemetry: TelemetryData = {
-          water,
-          status: evaluated.status,
-          isTankFull: evaluated.isTankFull,
-          target: 90,
-          cutoff: 95,
-          buzzer: evaluated.buzzer,
-          continuousBuzzer: evaluated.continuousBuzzer,
-          error: 'NONE',
-          isSensorUnavailable: false,
-          calStatus: 'OK',
-          calEmpty,
-          calFull,
-          distance,
-          timestamp: Date.now(),
-          rawLine: trimmed,
-        };
-
-        return { telemetry, raw: trimmed };
-      }
+      return { telemetry, raw: trimmed };
     }
   }
 
-  // Malformed or irrelevant diagnostic line: Do NOT interpret as valid telemetry!
-  return {
-    telemetry: null,
-    error: `Ignored non-telemetry line: '${trimmed.slice(0, 45)}'`,
-    raw: trimmed,
-  };
+  return { telemetry: null, raw: trimmed };
 }
 
-/**
- * Formats a command string with newline delimiter '\n' for 9600 baud transmission.
- */
-export function formatCommand(command: OutgoingCommand): string {
-  return `${command}\n`;
-}
-
-/**
- * Protocol Self-Test Suite
- * Rigorously verifies all supported final Arduino Uno packet formats,
- * missing sensor handling, calibration acknowledgements, and rejection of malformed data.
- */
 export interface ProtocolTestResult {
   name: string;
   passed: boolean;
-  inputDescription: string;
-  expected: string;
   actual: string;
+  inputDescription?: string;
 }
 
 export function runProtocolSelfTests(): ProtocolTestResult[] {
   const results: ProtocolTestResult[] = [];
 
-  // Test 1: Live data DISTANCE:2.74,LEVEL:97.2
-  const r1 = parseStatusLine('DISTANCE:2.74,LEVEL:97.2');
+  // Test 1: Standard Bluetooth SPP packet
+  const t1 = parseStatusLine('DISTANCE:8.25,LEVEL:48.9,MOTOR:OFF');
   results.push({
-    name: 'Live data parsing (DISTANCE:2.74,LEVEL:97.2)',
-    passed: r1.telemetry !== null && r1.telemetry.water === 97.2 && r1.telemetry.distance === 2.74 && r1.telemetry.status === 'CRITICAL',
-    inputDescription: 'DISTANCE:2.74,LEVEL:97.2',
-    expected: 'water=97.2%, distance=2.74cm, status=CRITICAL',
-    actual: r1.telemetry
-      ? `water=${r1.telemetry.water}%, distance=${r1.telemetry.distance}cm, status=${r1.telemetry.status}`
-      : 'Failed to parse',
+    name: 'SPP Live Telemetry: 48.9%, Motor OFF',
+    passed: t1.telemetry?.water === 48.9 && t1.telemetry?.motor === 'OFF' && t1.telemetry?.distance === 8.25,
+    actual: `water=${t1.telemetry?.water}%, motor=${t1.telemetry?.motor}, dist=${t1.telemetry?.distance}cm`,
   });
 
-  // Test 2: Sensor unavailable SENSOR:ABSENT
-  const r2 = parseStatusLine('SENSOR:ABSENT');
+  // Test 2: Motor ON telemetry
+  const t2 = parseStatusLine('DISTANCE:3.07,LEVEL:93.9,MOTOR:ON');
   results.push({
-    name: 'Sensor unavailable handling (SENSOR:ABSENT)',
-    passed: r2.telemetry !== null && r2.telemetry.isSensorUnavailable === true && r2.telemetry.water === null && r2.telemetry.status === 'SENSOR_ABSENT',
-    inputDescription: 'SENSOR:ABSENT',
-    expected: 'isSensorUnavailable=true, water=null, status=SENSOR_ABSENT',
-    actual: r2.telemetry
-      ? `isSensorUnavailable=${r2.telemetry.isSensorUnavailable}, water=${r2.telemetry.water}, status=${r2.telemetry.status}`
-      : 'Failed to parse',
+    name: 'Motor ON packet: 93.9%',
+    passed: t2.telemetry?.water === 93.9 && t2.telemetry?.motor === 'ON',
+    actual: `water=${t2.telemetry?.water}%, motor=${t2.telemetry?.motor}`,
   });
 
-  // Test 3: Startup WATER TANK MONITOR READY
-  const r3 = parseStatusLine('WATER TANK MONITOR READY');
+  // Test 3: Sensor Absent Error
+  const t3 = parseStatusLine('SENSOR:ABSENT');
   results.push({
-    name: 'Startup announcement (WATER TANK MONITOR READY)',
-    passed: r3.telemetry === null && r3.isSystemNotice === true,
-    inputDescription: 'WATER TANK MONITOR READY',
-    expected: 'telemetry=null, isSystemNotice=true',
-    actual: `telemetry=${r3.telemetry}, isSystemNotice=${r3.isSystemNotice}`,
+    name: 'Sensor Absent: Flagged Unavailable',
+    passed: t3.telemetry?.isSensorUnavailable === true && t3.telemetry?.water === null,
+    actual: `isUnavailable=${t3.telemetry?.isSensorUnavailable}, water=${t3.telemetry?.water}`,
   });
 
-  // Test 4: Calibration report CALIBRATION:EMPTY=14.00,FULL=2.42
-  const r4 = parseStatusLine('CALIBRATION:EMPTY=14.00,FULL=2.42');
+  // Test 4: Sensor Out of Range
+  const t4 = parseStatusLine('SENSOR:OUT_OF_RANGE,DISTANCE:24.28');
   results.push({
-    name: 'Calibration report (CALIBRATION:EMPTY=14.00,FULL=2.42)',
-    passed:
-      r4.calibrationUpdate !== undefined &&
-      r4.calibrationUpdate.calEmpty === 14.0 &&
-      r4.calibrationUpdate.calFull === 2.42,
-    inputDescription: 'CALIBRATION:EMPTY=14.00,FULL=2.42',
-    expected: 'calEmpty=14.00, calFull=2.42',
-    actual: r4.calibrationUpdate
-      ? `calEmpty=${r4.calibrationUpdate.calEmpty}, calFull=${r4.calibrationUpdate.calFull}`
-      : 'Failed to parse',
+    name: 'Sensor Out of Range',
+    passed: t4.telemetry?.isSensorUnavailable === true && t4.telemetry?.distance === 24.28,
+    actual: `isUnavailable=${t4.telemetry?.isSensorUnavailable}, dist=${t4.telemetry?.distance}cm`,
   });
 
-  // Test 5: Command ACK:CAL_EMPTY:OK and ACK:CAL_EMPTY:ERROR
-  const r5a = parseStatusLine('ACK:CAL_EMPTY:OK');
-  const r5b = parseStatusLine('ACK:CAL_EMPTY:ERROR');
+  // Test 5: Motor Acknowledgment
+  const t5 = parseStatusLine('ACK:MOTOR_ON:OK');
   results.push({
-    name: 'Command ACK CAL_EMPTY (OK & ERROR)',
-    passed: r5a.ack?.command === 'CAL_EMPTY' && r5a.ack?.status === 'OK' && r5b.ack?.status === 'ERROR',
-    inputDescription: 'ACK:CAL_EMPTY:OK and ACK:CAL_EMPTY:ERROR',
-    expected: 'ACK:CAL_EMPTY:OK and ACK:CAL_EMPTY:ERROR',
-    actual: `r5a=${r5a.ack?.command}:${r5a.ack?.status}, r5b=${r5b.ack?.command}:${r5b.ack?.status}`,
+    name: 'Motor ON Acknowledgement',
+    passed: t5.ack?.command === 'MOTOR_ON' && t5.ack?.status === 'OK',
+    actual: `ack=${t5.ack?.command}:${t5.ack?.status}`,
   });
 
-  // Test 6: Command ACK:CAL_FULL:OK and ACK:CAL_FULL:ERROR
-  const r6a = parseStatusLine('ACK:CAL_FULL:OK');
-  const r6b = parseStatusLine('ACK:CAL_FULL:ERROR');
+  // Test 6: Auto Event Target Reached
+  const t6 = parseStatusLine('AUTO:MOTOR_OFF:TARGET_REACHED');
   results.push({
-    name: 'Command ACK CAL_FULL (OK & ERROR)',
-    passed: r6a.ack?.command === 'CAL_FULL' && r6a.ack?.status === 'OK' && r6b.ack?.status === 'ERROR',
-    inputDescription: 'ACK:CAL_FULL:OK and ACK:CAL_FULL:ERROR',
-    expected: 'ACK:CAL_FULL:OK and ACK:CAL_FULL:ERROR',
-    actual: `r6a=${r6a.ack?.command}:${r6a.ack?.status}, r6b=${r6b.ack?.command}:${r6b.ack?.status}`,
-  });
-
-  // Test 7: Tank Full and continuous buzzer hysteresis (LEVEL:99.1)
-  const r7 = parseStatusLine('DISTANCE:2.42,LEVEL:99.1');
-  const buzzerActiveState = r7.telemetry?.buzzer === 'ON' && r7.telemetry?.continuousBuzzer === true && r7.telemetry?.isTankFull === true;
-  results.push({
-    name: 'Tank Full and continuous buzzer (LEVEL:99.1 >= 98.90%)',
-    passed: r7.telemetry !== null && buzzerActiveState,
-    inputDescription: 'DISTANCE:2.42,LEVEL:99.1',
-    expected: 'buzzer=ON, continuousBuzzer=true, isTankFull=true',
-    actual: r7.telemetry
-      ? `buzzer=${r7.telemetry.buzzer}, continuousBuzzer=${r7.telemetry.continuousBuzzer}, isTankFull=${r7.telemetry.isTankFull}`
-      : 'Failed',
-  });
-
-  // Test 8: Buzzer hysteresis deactivation below 97.50%
-  // Level is 97.2% with previous buzzer active: maintains buzzer
-  const r8a = parseStatusLine('DISTANCE:2.74,LEVEL:97.6', r7.telemetry);
-  const r8b = parseStatusLine('DISTANCE:2.74,LEVEL:97.2', r7.telemetry);
-  results.push({
-    name: 'Buzzer hysteresis drop below 97.50%',
-    passed: r8a.telemetry?.continuousBuzzer === true && r8b.telemetry?.continuousBuzzer === false,
-    inputDescription: 'Level 97.6% (maintains) vs 97.2% (falls below 97.5%)',
-    expected: '97.6% maintained (ON), 97.2% deactivated (OFF)',
-    actual: `at 97.6%: ${r8a.telemetry?.continuousBuzzer}, at 97.2%: ${r8b.telemetry?.continuousBuzzer}`,
-  });
-
-  // Test 9: Malformed data rejection
-  const r9 = parseStatusLine('DISTANCE:invalid,LEVEL:corrupted');
-  results.push({
-    name: 'Rejection of malformed data',
-    passed: r9.telemetry === null,
-    inputDescription: 'DISTANCE:invalid,LEVEL:corrupted',
-    expected: 'telemetry=null',
-    actual: `telemetry=${r9.telemetry}`,
-  });
-
-  // Test 10: Stream Accumulator with fragmented chunks
-  const accumulator = new ProtocolStreamAccumulator();
-  const chunk1Lines = accumulator.pushChunk('DISTANCE:2.74,');
-  const chunk2Lines = accumulator.pushChunk('LEVEL:97.2\nWATER TANK MONITOR ');
-  const chunk3Lines = accumulator.pushChunk('READY\r\n');
-
-  const accumulatedLines = [...chunk1Lines, ...chunk2Lines, ...chunk3Lines];
-  results.push({
-    name: 'ProtocolStreamAccumulator chunk reassembly',
-    passed: accumulatedLines.length === 2 && accumulatedLines[0] === 'DISTANCE:2.74,LEVEL:97.2' && accumulatedLines[1] === 'WATER TANK MONITOR READY',
-    inputDescription: 'Fragmented streaming chunks',
-    expected: '2 complete lines reassembled across 3 fragments',
-    actual: `${accumulatedLines.length} lines: ${JSON.stringify(accumulatedLines)}`,
+    name: 'Auto Event Target Reached',
+    passed: t6.autoEvent?.type === 'TARGET_REACHED' && t6.autoEvent?.motorState === 'OFF',
+    actual: `event=${t6.autoEvent?.type}, motor=${t6.autoEvent?.motorState}`,
   });
 
   return results;

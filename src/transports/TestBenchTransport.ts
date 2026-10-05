@@ -1,42 +1,49 @@
 /**
  * Hardware Test Bench & Loopback Transport
  *
- * Implements the exact same state machine as the final Arduino Uno firmware:
- * - Live data: DISTANCE:2.74,LEVEL:97.2
- * - Missing sensor: SENSOR:ABSENT
- * - Startup: WATER TANK MONITOR READY
- * - Calibration: CALIBRATION:EMPTY=14.00,FULL=2.42
- * - Acknowledgements: ACK:CAL_EMPTY:OK / ERROR, ACK:CAL_FULL:OK / ERROR
- * - Thresholds: 0-90% Normal/Low, >90-95% High, >95-98.9% Critical, >=98.9% Tank Full with continuous buzzer until < 97.5%
+ * Implements the exact same state machine as the Arduino smart water tank firmware:
+ * - Live data: DISTANCE:8.25,LEVEL:48.9,MOTOR:OFF
+ * - Motor commands: MOTOR_ON, MOTOR_OFF (with ACK:MOTOR_ON:OK, ACK:MOTOR_OFF:OK)
+ * - Modes: MODE:AUTO, MODE:MANUAL
+ * - Auto thresholds: AUTO_START:10, AUTO_TARGET:80
+ * - Auto events: AUTO:MOTOR_ON, AUTO:MOTOR_OFF:TARGET_REACHED, AUTO:MOTOR_OFF:SAFETY_LIMIT
+ * - Sensor errors: SENSOR:ABSENT, SENSOR:OUT_OF_RANGE
+ * - Calibration: CAL_EMPTY, CAL_FULL, STATUS
  */
 
 import { formatCommand, parseStatusLine } from '../protocol/protocolParser';
-import { AlarmState, ConnectionState, OutgoingCommand, TelemetryData, WaterLevelStatus } from '../types';
+import {
+  AlarmState,
+  ConnectionState,
+  ControlMode,
+  MotorState,
+  OutgoingCommand,
+  TelemetryData,
+  WaterLevelStatus,
+} from '../types';
 import { IHardwareTransport, TransportCallbacks } from './types';
 
 export class TestBenchTransport implements IHardwareTransport {
   private timer: number | null = null;
   private callbacks: TransportCallbacks;
 
-  // Authoritative Hardware State (identical to final Arduino Uno firmware)
-  private calEmpty: number = 14.00;
+  // Authoritative hardware state
+  private calEmpty: number = 13.02;
   private calFull: number = 2.42;
-  private distance: number = 2.74;
-  private water: number = 97.2;
-  private status: WaterLevelStatus = 'CRITICAL';
-  private target: number = 90;
-  private cutoff: number = 95;
+  private distance: number = 7.72; // ~50%
+  private water: number = 50.0;
+  private motor: MotorState = 'OFF';
+  private mode: ControlMode = 'AUTO';
+  private autoStart: number = 10;
+  private autoTarget: number = 80;
+  private status: WaterLevelStatus = 'NORMAL';
   private isSensorAbsent: boolean = false;
-  private continuousBuzzer: boolean = false;
   private buzzer: AlarmState = 'OFF';
-  private outputFormatMode: 'bluetooth_compact' | 'usb_human' = 'bluetooth_compact';
-
-  private lastTelemetry: TelemetryData | null = null;
 
   private state: ConnectionState = {
     status: 'disconnected',
     transport: 'test_bench',
-    deviceName: 'Arduino Uno (Loopback Test Bench at 9600 baud)',
+    deviceName: 'Arduino Uno Test Bench (9600 baud)',
     baudRate: 9600,
     packetsReceived: 0,
     packetsSent: 0,
@@ -58,8 +65,9 @@ export class TestBenchTransport implements IHardwareTransport {
     return { ...this.state };
   }
 
-  public setOutputFormatMode(mode: 'bluetooth_compact' | 'usb_human'): void {
-    this.outputFormatMode = mode;
+  private updateState(updates: Partial<ConnectionState>): void {
+    this.state = { ...this.state, ...updates };
+    this.callbacks.onStatusChange?.(this.getState());
   }
 
   public async connect(): Promise<boolean> {
@@ -70,26 +78,19 @@ export class TestBenchTransport implements IHardwareTransport {
       readerActive: false,
       hasReceivedValidTelemetry: false,
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 150));
 
     this.updateState({
       status: 'connected',
-      deviceName: 'Arduino Uno (Loopback Test Bench at 9600 baud)',
+      deviceName: 'Arduino Uno Test Bench (9600 baud)',
       readerActive: true,
     });
 
-    // 1. Emit startup notice exactly like Arduino Uno
-    const startupLine = 'WATER TANK MONITOR READY';
-    this.state.bytesReceived += startupLine.length + 2;
-    this.state.lastRawText = startupLine;
-    this.state.lastRawLineTime = Date.now();
-    this.callbacks.onRawLineReceived(startupLine, 'RX');
-
-    // 2. Initial broadcast
+    // Calculate initial state and broadcast immediately
     this.calculateWaterAndStatus();
     this.broadcastTelemetry();
 
-    // 3. Periodic broadcast every 1s
+    // Periodic simulation tick every 1000ms
     this.timer = window.setInterval(() => {
       this.tickHardwarePhysics();
       this.broadcastTelemetry();
@@ -104,14 +105,13 @@ export class TestBenchTransport implements IHardwareTransport {
       this.timer = null;
     }
     this.buzzer = 'OFF';
-    this.continuousBuzzer = false;
     this.updateState({
       status: 'disconnected',
       readerActive: false,
     });
   }
 
-  public async sendCommand(command: OutgoingCommand): Promise<boolean> {
+  public async sendCommand(command: OutgoingCommand | string): Promise<boolean> {
     if (this.state.status !== 'connected') {
       this.callbacks.onError('Test bench is not connected.');
       return false;
@@ -124,7 +124,61 @@ export class TestBenchTransport implements IHardwareTransport {
     const trimmed = command.trim();
     const upper = trimmed.toUpperCase();
 
-    // 1. CAL_EMPTY
+    // 1. MOTOR_ON
+    if (upper === 'MOTOR_ON') {
+      if (this.water >= 95.0) {
+        this.emitAck('MOTOR_ON', 'ERROR', 'SAFETY_LIMIT_95');
+        return false;
+      }
+      this.motor = 'ON';
+      this.emitAck('MOTOR_ON', 'OK');
+      setTimeout(() => this.broadcastTelemetry(), 50);
+      return true;
+    }
+
+    // 2. MOTOR_OFF
+    if (upper === 'MOTOR_OFF') {
+      this.motor = 'OFF';
+      this.emitAck('MOTOR_OFF', 'OK');
+      setTimeout(() => this.broadcastTelemetry(), 50);
+      return true;
+    }
+
+    // 3. MODE:AUTO / MODE:MANUAL
+    if (upper === 'MODE:AUTO') {
+      this.mode = 'AUTO';
+      this.emitLine('MODE:AUTO');
+      setTimeout(() => this.broadcastTelemetry(), 50);
+      return true;
+    }
+    if (upper === 'MODE:MANUAL') {
+      this.mode = 'MANUAL';
+      this.emitLine('MODE:MANUAL');
+      setTimeout(() => this.broadcastTelemetry(), 50);
+      return true;
+    }
+
+    // 4. AUTO_START:X
+    if (upper.startsWith('AUTO_START:')) {
+      const val = parseFloat(trimmed.split(':')[1]);
+      if (!isNaN(val) && val >= 0 && val <= 90) {
+        this.autoStart = val;
+        this.emitLine(`AUTO_START:${val}`);
+        return true;
+      }
+    }
+
+    // 5. AUTO_TARGET:X
+    if (upper.startsWith('AUTO_TARGET:')) {
+      const val = parseFloat(trimmed.split(':')[1]);
+      if (!isNaN(val) && val >= 1 && val <= 95) {
+        this.autoTarget = Math.min(95, val);
+        this.emitLine(`AUTO_TARGET:${this.autoTarget}`);
+        return true;
+      }
+    }
+
+    // 6. CAL_EMPTY
     if (upper === 'CAL_EMPTY') {
       if (this.isSensorAbsent) {
         this.emitAck('CAL_EMPTY', 'ERROR', 'SENSOR_UNAVAILABLE');
@@ -132,71 +186,102 @@ export class TestBenchTransport implements IHardwareTransport {
         this.calEmpty = Math.round(this.distance * 100) / 100;
         this.calculateWaterAndStatus();
         this.emitAck('CAL_EMPTY', 'OK');
-        // Report updated calibration line
-        this.emitCalibrationReport();
+        this.emitLine(`CALIBRATION:EMPTY=${this.calEmpty.toFixed(2)},FULL=${this.calFull.toFixed(2)}`);
       }
+      return true;
     }
-    // 2. CAL_FULL
-    else if (upper === 'CAL_FULL') {
+
+    // 7. CAL_FULL
+    if (upper === 'CAL_FULL') {
       if (this.isSensorAbsent) {
         this.emitAck('CAL_FULL', 'ERROR', 'SENSOR_UNAVAILABLE');
       } else if (this.distance < this.calEmpty) {
         this.calFull = Math.round(this.distance * 100) / 100;
         this.calculateWaterAndStatus();
         this.emitAck('CAL_FULL', 'OK');
-        // Report updated calibration line
-        this.emitCalibrationReport();
+        this.emitLine(`CALIBRATION:EMPTY=${this.calEmpty.toFixed(2)},FULL=${this.calFull.toFixed(2)}`);
       } else {
         this.emitAck('CAL_FULL', 'ERROR', 'FULL_MUST_BE_LESS_THAN_EMPTY');
       }
+      return true;
     }
-    // 3. STATUS (Request stored calibration values & immediate status)
-    else if (upper === 'STATUS') {
-      this.emitCalibrationReport();
-      setTimeout(() => {
-        this.broadcastTelemetry();
-      }, 50);
+
+    // 8. STATUS
+    if (upper === 'STATUS') {
+      this.emitLine(`CALIBRATION:EMPTY=${this.calEmpty.toFixed(2)},FULL=${this.calFull.toFixed(2)}`);
+      setTimeout(() => this.broadcastTelemetry(), 50);
       return true;
     }
 
     return true;
   }
 
-  private emitAck(cmd: string, status: 'OK' | 'ERROR', reason?: string): void {
-    const ackLine = `ACK:${cmd}:${status}${reason ? `:${reason}` : ''}`;
-    this.state.bytesReceived += ackLine.length + 2;
-    this.state.lastRawText = ackLine;
+  private emitLine(line: string): void {
+    this.state.bytesReceived += line.length + 2;
+    this.state.lastRawText = line;
     this.state.lastRawLineTime = Date.now();
-    this.callbacks.onRawLineReceived(ackLine, 'RX');
+    this.callbacks.onRawLineReceived(line, 'RX');
   }
 
-  private emitCalibrationReport(): void {
-    const calLine = `CALIBRATION:EMPTY=${this.calEmpty.toFixed(2)},FULL=${this.calFull.toFixed(2)}`;
-    this.state.bytesReceived += calLine.length + 2;
-    this.state.lastRawText = calLine;
-    this.state.lastRawLineTime = Date.now();
-    this.callbacks.onRawLineReceived(calLine, 'RX');
-
-    this.callbacks.onCalibrationUpdate?.({
-      calEmpty: this.calEmpty,
-      calFull: this.calFull,
-    });
+  private emitAck(cmd: string, status: 'OK' | 'ERROR', reason?: string): void {
+    const ackLine = `ACK:${cmd}:${status}${reason ? `:${reason}` : ''}`;
+    this.emitLine(ackLine);
+    const parsed = parseStatusLine(ackLine);
+    if (parsed.ack) {
+      // Notified via raw line
+    }
   }
 
   private tickHardwarePhysics(): void {
     if (this.isSensorAbsent) return;
 
-    // Small physical fluctuation
-    const noise = (Math.random() - 0.5) * 0.02;
+    // If motor is running, tank level rises by ~0.8% per second
+    if (this.motor === 'ON') {
+      this.water = Math.min(100, this.water + 0.8);
+      // Recalculate distance corresponding to new water level
+      const usableHeight = this.calEmpty - this.calFull;
+      this.distance = this.calEmpty - (this.water / 100) * usableHeight;
+
+      // AUTO mode cutoff check
+      if (this.mode === 'AUTO') {
+        if (this.water >= this.autoTarget && this.water < 95.0) {
+          this.motor = 'OFF';
+          this.emitLine('AUTO:MOTOR_OFF:TARGET_REACHED');
+        } else if (this.water >= 95.0) {
+          this.motor = 'OFF';
+          this.emitLine('AUTO:MOTOR_OFF:SAFETY_LIMIT');
+        }
+      } else if (this.water >= 95.0) {
+        // Even in manual mode, Arduino enforces 95% safety cutoff!
+        this.motor = 'OFF';
+        this.emitLine('ACK:MOTOR_OFF:SAFETY_LIMIT');
+      }
+    } else {
+      // Slight natural drop or water usage simulation (~0.1% occasionally)
+      if (this.water > 0 && Math.random() < 0.25) {
+        this.water = Math.max(0, this.water - 0.2);
+        const usableHeight = this.calEmpty - this.calFull;
+        this.distance = this.calEmpty - (this.water / 100) * usableHeight;
+      }
+
+      // AUTO mode trigger start if level falls below autoStart
+      if (this.mode === 'AUTO' && this.water <= this.autoStart && this.water < this.autoTarget) {
+        this.motor = 'ON';
+        this.emitLine('AUTO:MOTOR_ON');
+      }
+    }
+
+    // Small sensor noise (±0.02 cm) to simulate real-world HC-SR04 readings
+    const noise = (Math.random() - 0.5) * 0.04;
     this.distance = Math.round((this.distance + noise) * 100) / 100;
+
     this.calculateWaterAndStatus();
   }
 
   private calculateWaterAndStatus(): void {
     if (this.isSensorAbsent) {
-      this.status = 'SENSOR_ABSENT';
+      this.status = 'SENSOR_ERROR';
       this.buzzer = 'OFF';
-      this.continuousBuzzer = false;
       return;
     }
 
@@ -209,22 +294,11 @@ export class TestBenchTransport implements IHardwareTransport {
       this.water = Math.min(100, Math.max(0, Math.round(pct * 10) / 10));
     }
 
-    // Continuous buzzer hysteresis:
-    // Triggers at >= 98.90% and maintains until falling below 97.50%
-    if (this.water >= 98.90) {
-      this.continuousBuzzer = true;
-    } else if (this.continuousBuzzer && this.water < 97.50) {
-      this.continuousBuzzer = false;
-    }
+    this.buzzer = this.water >= 95.0 ? 'ON' : 'OFF';
 
-    this.buzzer = this.continuousBuzzer || this.water > 95.0 ? 'ON' : 'OFF';
-
-    // Status: Low (0-25%), Normal (25-90%), High (90-95%), Critical (>95% or >=98.90%)
-    if (this.water >= 98.90) {
+    if (this.water >= 95.0) {
       this.status = 'CRITICAL';
-    } else if (this.water > 95.0) {
-      this.status = 'CRITICAL';
-    } else if (this.water > 90.0) {
+    } else if (this.water > 80.0) {
       this.status = 'HIGH';
     } else if (this.water <= 25.0) {
       this.status = 'LOW';
@@ -237,73 +311,50 @@ export class TestBenchTransport implements IHardwareTransport {
     let line: string;
 
     if (this.isSensorAbsent) {
-      // Exact Arduino message when ultrasonic sensor is absent/disconnected
       line = 'SENSOR:ABSENT';
-    } else if (this.outputFormatMode === 'bluetooth_compact') {
-      // Exact final Arduino HC-05 format: DISTANCE:2.74,LEVEL:97.2
-      line = `DISTANCE:${this.distance.toFixed(2)},LEVEL:${this.water.toFixed(1)}`;
     } else {
-      // USB format: Distance: 8.25 cm | Water Level: 48.9%
-      line = `Distance: ${this.distance.toFixed(2)} cm | Water Level: ${this.water.toFixed(1)}%`;
+      // Exact user-specified Arduino format:
+      // DISTANCE:8.25,LEVEL:48.9,MOTOR:OFF
+      line = `DISTANCE:${this.distance.toFixed(2)},LEVEL:${this.water.toFixed(1)},MOTOR:${this.motor}`;
     }
 
     this.state.bytesReceived += line.length + 2;
+    this.state.packetsReceived++;
+    this.state.lastPacketTime = Date.now();
     this.state.lastRawText = line;
     this.state.lastRawLineTime = Date.now();
+    this.state.lastValidTelemetryTime = Date.now();
+    this.state.hasReceivedValidTelemetry = true;
+
     this.callbacks.onRawLineReceived(line, 'RX');
 
-    const parsed = parseStatusLine(line, this.lastTelemetry);
-    if (parsed.telemetry) {
-      this.lastTelemetry = parsed.telemetry;
-      this.state.packetsReceived++;
-      this.state.lastPacketTime = Date.now();
-      this.state.lastValidTelemetryTime = Date.now();
-      this.state.hasReceivedValidTelemetry = true;
-      this.callbacks.onTelemetry(parsed.telemetry);
+    const result = parseStatusLine(line);
+    if (result.telemetry) {
+      // Enrich with current test bench mode and targets
+      result.telemetry.mode = this.mode;
+      result.telemetry.autoStart = this.autoStart;
+      result.telemetry.autoTarget = this.autoTarget;
+      this.callbacks.onTelemetry(result.telemetry);
     }
 
     this.callbacks.onStatusChange(this.getState());
   }
 
-  public injectFault(faultType: 'SENSOR:ABSENT' | 'HIGH_92' | 'CRITICAL_96' | 'TANK_FULL_99' | 'HYSTERESIS_97' | 'CLEAR'): void {
-    if (faultType === 'SENSOR:ABSENT') {
-      this.isSensorAbsent = true;
-      this.calculateWaterAndStatus();
-    } else if (faultType === 'HIGH_92') {
-      this.isSensorAbsent = false;
-      this.setWaterLevel(92.0);
-    } else if (faultType === 'CRITICAL_96') {
-      this.isSensorAbsent = false;
-      this.setWaterLevel(96.0);
-    } else if (faultType === 'TANK_FULL_99') {
-      this.isSensorAbsent = false;
-      this.setWaterLevel(99.2);
-    } else if (faultType === 'HYSTERESIS_97') {
-      this.isSensorAbsent = false;
-      // Set to 97.4% (below 97.5% buzzer reset mark)
-      this.setWaterLevel(97.2);
-    } else if (faultType === 'CLEAR') {
-      this.isSensorAbsent = false;
-      this.setWaterLevel(50.0);
+  // Helper methods to simulate hardware conditions from Diagnostics
+  public toggleSensorAbsent(absent: boolean): void {
+    this.isSensorAbsent = absent;
+    if (absent && this.motor === 'ON') {
+      this.motor = 'OFF';
+      this.emitLine('AUTO:MOTOR_OFF:SENSOR_INVALID');
     }
     this.broadcastTelemetry();
   }
 
-  public setWaterLevel(level: number): void {
-    this.isSensorAbsent = false;
-    this.water = Math.min(100, Math.max(0, level));
+  public setWaterLevel(targetLevel: number): void {
+    this.water = Math.min(100, Math.max(0, targetLevel));
     const usableHeight = this.calEmpty - this.calFull;
-    const waterDepth = (this.water / 100) * usableHeight;
-    this.distance = Math.round((this.calEmpty - waterDepth) * 100) / 100;
+    this.distance = this.calEmpty - (this.water / 100) * usableHeight;
     this.calculateWaterAndStatus();
     this.broadcastTelemetry();
-  }
-
-  private updateState(partial: Partial<ConnectionState>): void {
-    this.state = {
-      ...this.state,
-      ...partial,
-    };
-    this.callbacks.onStatusChange(this.getState());
   }
 }
